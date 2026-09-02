@@ -459,7 +459,8 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   connect(serviceLogsButton_, &QPushButton::clicked, this, [this] {
     runCommand(
         QStringLiteral("Follow service log"),
-        QStringLiteral("journalctl --follow --lines=100 --output=cat --unit=%1")
+        QStringLiteral("journalctl --namespace=dkfz-live --follow --lines=100 "
+                       "--output=cat --unit=%1")
             .arg(kServiceName),
         TaskKind::serviceLogs);
   });
