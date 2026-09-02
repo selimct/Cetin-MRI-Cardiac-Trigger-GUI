@@ -27,6 +27,13 @@ warning is amber because it represents a healthy process waiting for usable
 signal, not a runtime failure. Unclassified output remains neutral unless it
 contains an explicit elevated-severity keyword.
 
+Follow Log parses the service's structured diagnostics in the desktop GUI and
+shows compact operational summaries instead of the full JSON records. The
+Jetson still sends the original journal stream unchanged. Journal metadata and
+diagnostic bookkeeping timestamps are removed; runtime status retains input,
+throughput, inference, queue, output, latency, reset, and nonzero data-quality
+information. Non-JSON lines such as boot separators remain visible.
+
 ### Installed service
 
 Controls the checkout-linked `dkfz-native-uart-live` systemd unit. An

@@ -19,3 +19,4 @@ enum class RuntimeInputEvent {
 [[nodiscard]] ConsoleLineSeverity classifyConsoleLine(const QByteArray &line);
 [[nodiscard]] RuntimeInputEvent
 runtimeInputEventForConsoleLine(const QByteArray &line);
+[[nodiscard]] QByteArray serviceLogDisplayLine(const QByteArray &line);

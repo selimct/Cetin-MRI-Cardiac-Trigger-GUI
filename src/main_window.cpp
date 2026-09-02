@@ -830,14 +830,17 @@ void MainWindow::appendClassifiedConsoleBytes(QByteArray &pending,
     pending.remove(0, newline + 1);
     applyRuntimeInputEvent(line);
     const ConsoleLineSeverity severity = classifyConsoleLine(line);
+    const QByteArray displayLine = activeTask_ == TaskKind::serviceLogs
+                                       ? serviceLogDisplayLine(line)
+                                       : line;
     if (severity == ConsoleLineSeverity::elevated) {
-      appendConsoleBytes(line, elevatedColor());
+      appendConsoleBytes(displayLine, elevatedColor());
     } else if (severity == ConsoleLineSeverity::attention) {
-      appendConsoleBytes(line, attentionColor());
+      appendConsoleBytes(displayLine, attentionColor());
     } else if (severity == ConsoleLineSeverity::informational) {
-      appendConsoleBytes(line, informationalColor());
+      appendConsoleBytes(displayLine, informationalColor());
     } else {
-      appendConsoleBytes(line, palette().color(QPalette::Text));
+      appendConsoleBytes(displayLine, palette().color(QPalette::Text));
     }
   }
 }
