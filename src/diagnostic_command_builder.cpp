@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Furkan Selim Cetin <contact@furkancetin.dev>
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Developed at the German Cancer Research Center (DKFZ).
+
 #include "diagnostic_command_builder.h"
 
 #include "ssh_command_builder.h"
@@ -8,7 +12,7 @@
 
 namespace {
 constexpr auto kRuntimeExecutable =
-    "build_data_ingest/inference/native_uart_live_runtime";
+    "build_native/inference/native_uart_live_runtime";
 constexpr auto kServiceName = "dkfz-native-uart-live";
 constexpr auto kServiceUnit = "deploy/dkfz-native-uart-live.service";
 constexpr auto kServiceConfig = "config/native_uart_live.conf";
@@ -287,7 +291,7 @@ QString availabilityProbeCommand(const DiagnosticRuntimeOptions &options) {
           "grep -Fqx -- \"BindReadOnlyPaths=${repo_root}:/opt/dkfz-live\" "
           "%3 && "
           "grep -Fqx -- 'WorkingDirectory=/opt/dkfz-live' %3 && "
-          "grep -Fqx -- 'ExecStart=/opt/dkfz-live/build_data_ingest/"
+          "grep -Fqx -- 'ExecStart=/opt/dkfz-live/build_native/"
           "inference/native_uart_live_runtime --config "
           "/opt/dkfz-live/config/native_uart_live.conf' %3 && "
           "grep -Fqx -- 'ReadWritePaths=/var/lib/dkfz-live' %3 && "
@@ -360,7 +364,7 @@ QString availabilityProbeCommand(const DiagnosticRuntimeOptions &options) {
           "prepare_present=yes; fi; "
           "if %1; then prepare_inputs=yes; fi; "
           "if test -x run/rebuild_native.sh && "
-          "test -x run/build_data_ingest.sh; then rebuild_present=yes; fi; "
+          "test -x run/build_native.sh; then rebuild_present=yes; fi; "
           "service_ready=no; "
           "if test \"$service_installed\" = yes && "
           "test \"$service_linked\" = yes && "
@@ -393,4 +397,11 @@ QString availabilityProbeCommand(const DiagnosticRuntimeOptions &options) {
       "printf '__JCG_REBUILD__=%s\\n' \"$rebuild_present\"; "
       "printf '__JCG_DIRECT_ACTIVE__=%s\\n' \"$direct_active\"");
   return command;
+}
+
+QString rebuildRuntimeCommand() {
+  return QStringLiteral(
+      "if test -f build_native/CMakeCache.txt; then "
+      "bash run/rebuild_native.sh --target native_uart_live_runtime; "
+      "else bash run/build_native.sh --tensorrt on --test; fi");
 }

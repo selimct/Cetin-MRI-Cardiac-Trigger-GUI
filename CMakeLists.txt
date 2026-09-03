@@ -1,6 +1,10 @@
+# Copyright (c) 2026 Furkan Selim Cetin <contact@furkancetin.dev>
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Developed at the German Cancer Research Center (DKFZ).
+
 cmake_minimum_required(VERSION 3.21)
 
-project(jetson_control_gui VERSION 0.1.0 LANGUAGES CXX)
+project(jetson_control_gui VERSION 0.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

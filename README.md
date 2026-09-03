@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2026 Furkan Selim Cetin <contact@furkancetin.dev>
+SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+Developed at the German Cancer Research Center (DKFZ).
+-->
+
 # Jetson Control GUI
 
 A local Qt 6 desktop application for running commands on the Jetson over SSH
@@ -73,7 +79,7 @@ Operates the current checkout beneath the selected remote project root. It can:
 - prepare a selected best/tuned model on the Jetson in either of two modes:
   TensorRT from an existing ONNX (`--jetson-only`), or the complete
   PTH-to-ONNX-to-TensorRT pipeline;
-- select an exact source directory such as `models/target_r` or
+- select an exact source directory such as `finished_models/target_r` or
   `models_noCV/target_r` and pass it through `--model-dir`;
 - atomically activate the resulting engine and manifest as
   `deploy/model/model.engine` and `deploy/model/model.conf`;
@@ -296,7 +302,7 @@ An entry from `~/.ssh/config` can be entered directly into the Host field. The
 GUI's explicit User, Port, and SSH key values take precedence over values in
 SSH config.
 Set Remote project root to the actual checkout containing `prepare_model.sh`,
-`run/`, `config/`, `models/`, and `build_data_ingest/`; do not set it to the
+`run/`, `config/`, `finished_models/`, and `build_native/`; do not set it to the
 service-only `/opt/dkfz-live` mount. With the provided unit this is
 `/home/orin/work/live_stack`.
 
@@ -309,7 +315,7 @@ through systemd once its deployment has been reviewed and configured.
 
 ## Disclaimer
 
-Copyright (c) 2026 Furkan Selim Cetin <mail@furkancetin.dev>
+Copyright (c) 2026 Furkan Selim Cetin <contact@furkancetin.dev>
 
 This software is provided "as is", without any warranty or condition. To the
 extent permitted by law, the copyright holder will not be liable for damages

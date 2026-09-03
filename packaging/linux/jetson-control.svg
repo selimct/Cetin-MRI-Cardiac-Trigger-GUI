@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+Copyright (c) 2026 Furkan Selim Cetin <contact@furkancetin.dev>
+SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+Developed at the German Cancer Research Center (DKFZ).
+-->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
   <defs>
     <linearGradient id="background" x1="34" y1="24" x2="222" y2="232" gradientUnits="userSpaceOnUse">

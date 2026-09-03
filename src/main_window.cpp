@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Furkan Selim Cetin <contact@furkancetin.dev>
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Developed at the German Cancer Research Center (DKFZ).
+
 #include "main_window.h"
 
 #include "console_output_classifier.h"
@@ -228,7 +232,7 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   modelNameEdit_->setToolTip(QStringLiteral(
       "The modelname declared by the selected training configuration."));
   modelDirectoryEdit_ =
-      new QLineEdit(QStringLiteral("models/target_r"), diagnosticPage);
+      new QLineEdit(QStringLiteral("finished_models/target_r"), diagnosticPage);
   modelDirectoryEdit_->setToolTip(QStringLiteral(
       "Exact source directory beneath the remote project root. Use this for "
       "alternate roots such as models_noCV/target_r."));
@@ -504,13 +508,8 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   connect(stopInferenceButton_, &QPushButton::clicked, this,
           &MainWindow::stopDirectInference);
   connect(rebuildRuntimeButton_, &QPushButton::clicked, this, [this] {
-    runCommand(
-        QStringLiteral("Build or rebuild runtime"),
-        QStringLiteral(
-            "if test -f build_data_ingest/CMakeCache.txt; then "
-            "bash run/rebuild_native.sh --target native_uart_live_runtime; "
-            "else bash run/build_data_ingest.sh --tensorrt on --test; fi"),
-        TaskKind::rebuildRuntime);
+    runCommand(QStringLiteral("Build or rebuild runtime"),
+               rebuildRuntimeCommand(), TaskKind::rebuildRuntime);
   });
 
   connect(runButton_, &QPushButton::clicked, this, [this] {
@@ -547,7 +546,7 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
           [this, invalidate](const QString &name) {
             if (modelDirectoryFollowsName_) {
               modelDirectoryEdit_->setText(
-                  QStringLiteral("models/%1").arg(name.trimmed()));
+                  QStringLiteral("finished_models/%1").arg(name.trimmed()));
             }
             invalidate();
           });

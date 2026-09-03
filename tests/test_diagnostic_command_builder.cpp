@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Furkan Selim Cetin <contact@furkancetin.dev>
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Developed at the German Cancer Research Center (DKFZ).
+
 #include "diagnostic_command_builder.h"
 
 #include <QProcess>
@@ -14,6 +18,7 @@ private slots:
   void buildsSafeDirectRuntimeCommand();
   void validatesInputRecoveryContract();
   void buildsAvailabilityProbe();
+  void buildsNativeRuntimeRebuildCommand();
   void generatedCommandsParseAsBash();
 };
 
@@ -98,6 +103,9 @@ void DiagnosticCommandBuilderTest::buildsSafeDirectRuntimeCommand() {
   };
   const QString command = startDirectRuntimeCommand(options);
 
+  QVERIFY(command.contains(
+      QStringLiteral("build_native/inference/native_uart_live_runtime")));
+  QVERIFY(!command.contains(QStringLiteral("build_data_ingest")));
   QVERIFY(command.contains(QStringLiteral("deploy/model/model.conf")));
   QVERIFY(command.contains(QStringLiteral("--trigger-output 'jsonl'")));
   QVERIFY(command.contains(QStringLiteral("--emit-probabilities")));
@@ -137,12 +145,25 @@ void DiagnosticCommandBuilderTest::buildsAvailabilityProbe() {
   QVERIFY(command.contains(QStringLiteral("stuck_signal_reset_ms")));
   QVERIFY(command.contains(QStringLiteral("input_recovery_ms")));
   QVERIFY(command.contains(QStringLiteral("StatusText")));
+  QVERIFY(command.contains(QStringLiteral(
+      "ExecStart=/opt/dkfz-live/build_native/inference/"
+      "native_uart_live_runtime")));
+  QVERIFY(command.contains(QStringLiteral("run/build_native.sh")));
+  QVERIFY(!command.contains(QStringLiteral("build_data_ingest")));
   QVERIFY(!command.contains(QStringLiteral("/etc/dkfz-live")));
 
   options.preparationMode = QStringLiteral("complete");
   const QString completeCommand = availabilityProbeCommand(options);
   QVERIFY(!completeCommand.contains(
       QStringLiteral("models_noCV/target_r/target_r.onnx")));
+}
+
+void DiagnosticCommandBuilderTest::buildsNativeRuntimeRebuildCommand() {
+  const QString command = rebuildRuntimeCommand();
+  QVERIFY(command.contains(QStringLiteral("build_native/CMakeCache.txt")));
+  QVERIFY(command.contains(QStringLiteral("run/rebuild_native.sh")));
+  QVERIFY(command.contains(QStringLiteral("run/build_native.sh")));
+  QVERIFY(!command.contains(QStringLiteral("build_data_ingest")));
 }
 
 void DiagnosticCommandBuilderTest::generatedCommandsParseAsBash() {
@@ -161,7 +182,7 @@ void DiagnosticCommandBuilderTest::generatedCommandsParseAsBash() {
   const QStringList commands{
       prepareModelCommand(options),       validateRuntimeCommand(options),
       startDirectRuntimeCommand(options), stopDirectRuntimeCommand(),
-      availabilityProbeCommand(options),
+      availabilityProbeCommand(options), rebuildRuntimeCommand(),
   };
 
   for (const QString &command : commands) {

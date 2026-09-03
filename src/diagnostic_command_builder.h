@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Furkan Selim Cetin <contact@furkancetin.dev>
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Developed at the German Cancer Research Center (DKFZ).
+
 #pragma once
 
 #include <QString>
@@ -26,3 +30,4 @@ startDirectRuntimeCommand(const DiagnosticRuntimeOptions &options);
 [[nodiscard]] QString stopDirectRuntimeCommand();
 [[nodiscard]] QString
 availabilityProbeCommand(const DiagnosticRuntimeOptions &options);
+[[nodiscard]] QString rebuildRuntimeCommand();

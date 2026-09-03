@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Furkan Selim Cetin <contact@furkancetin.dev>
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Developed at the German Cancer Research Center (DKFZ).
+
 #include <windows.h>
 
 #define IDI_APP_ICON 101

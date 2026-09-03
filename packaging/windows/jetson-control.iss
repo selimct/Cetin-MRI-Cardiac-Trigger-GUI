@@ -1,3 +1,7 @@
+; Copyright (c) 2026 Furkan Selim Cetin <contact@furkancetin.dev>
+; SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+; Developed at the German Cancer Research Center (DKFZ).
+
 #define MyAppName "Jetson Control"
 #define MyAppPublisher "DKFZ"
 #define MyAppExeName "jetson-control.exe"
