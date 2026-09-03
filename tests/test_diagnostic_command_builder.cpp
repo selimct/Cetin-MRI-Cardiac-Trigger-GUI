@@ -14,6 +14,7 @@ class DiagnosticCommandBuilderTest final : public QObject {
 private slots:
   void validatesParameters();
   void resolvesActiveManifest();
+  void buildsServiceUnitRepairCommand();
   void buildsPreparationCommand();
   void buildsSafeDirectRuntimeCommand();
   void validatesInputRecoveryContract();
@@ -74,6 +75,22 @@ void DiagnosticCommandBuilderTest::resolvesActiveManifest() {
   QCOMPARE(diagnosticManifestPath(), QStringLiteral("deploy/model/model.conf"));
 }
 
+void DiagnosticCommandBuilderTest::buildsServiceUnitRepairCommand() {
+  const QString nonInteractive = serviceUnitRepairCommand(false);
+  QVERIFY(nonInteractive.contains(QStringLiteral("sudo -n -- bash -c")));
+  QVERIFY(nonInteractive.contains(
+      QStringLiteral("deploy/dkfz-native-uart-live.service")));
+  QVERIFY(nonInteractive.contains(QStringLiteral(
+      "/etc/systemd/system/dkfz-native-uart-live.service")));
+  QVERIFY(nonInteractive.contains(QStringLiteral("ln -sfnT")));
+  QVERIFY(nonInteractive.contains(QStringLiteral("systemctl daemon-reload")));
+  QVERIFY(nonInteractive.contains(QStringLiteral("Refusing to replace")));
+
+  const QString withPassword = serviceUnitRepairCommand(true);
+  QVERIFY(withPassword.contains(QStringLiteral("sudo -S -p '' -- bash -c")));
+  QVERIFY(!withPassword.contains(QStringLiteral("sudo -n")));
+}
+
 void DiagnosticCommandBuilderTest::buildsPreparationCommand() {
   DiagnosticRuntimeOptions options{
       .modelName = QStringLiteral("target-r"),
@@ -126,6 +143,7 @@ void DiagnosticCommandBuilderTest::buildsAvailabilityProbe() {
   QVERIFY(command.contains(QStringLiteral("__JCG_SERVICE_ACTIVE__")));
   QVERIFY(command.contains(QStringLiteral("__JCG_SERVICE_INPUT__")));
   QVERIFY(command.contains(QStringLiteral("__JCG_SERVICE_READY__")));
+  QVERIFY(command.contains(QStringLiteral("__JCG_SERVICE_UNIT__")));
   QVERIFY(command.contains(QStringLiteral("__JCG_SERVICE_LINKED__")));
   QVERIFY(command.contains(QStringLiteral("__JCG_SERVICE_CONTRACT__")));
   QVERIFY(command.contains(QStringLiteral("__JCG_RUNTIME__")));
@@ -182,6 +200,7 @@ void DiagnosticCommandBuilderTest::generatedCommandsParseAsBash() {
   const QStringList commands{
       prepareModelCommand(options),       validateRuntimeCommand(options),
       startDirectRuntimeCommand(options), stopDirectRuntimeCommand(),
+      serviceUnitRepairCommand(false),    serviceUnitRepairCommand(true),
       availabilityProbeCommand(options), rebuildRuntimeCommand(),
   };
 

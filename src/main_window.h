@@ -38,6 +38,7 @@ private:
     ordinary,
     availabilityProbe,
     serviceMutation,
+    serviceUnitRepair,
     serviceLogs,
     validateRuntime,
     prepareModel,
@@ -50,6 +51,7 @@ private:
     bool service{false};
     bool serviceActive{false};
     bool serviceEnabled{false};
+    bool serviceUnit{false};
     bool serviceLinkedToCheckout{false};
     bool serviceContract{false};
     bool serviceReady{false};
@@ -120,6 +122,7 @@ private:
   QTabWidget *operationsTabs_{nullptr};
   QLabel *serviceAvailabilityLabel_{nullptr};
   QCheckBox *serviceSafetyCheck_{nullptr};
+  QPushButton *serviceInstallButton_{nullptr};
   QPushButton *serviceStatusButton_{nullptr};
   QPushButton *serviceReloadButton_{nullptr};
   QPushButton *serviceStartButton_{nullptr};

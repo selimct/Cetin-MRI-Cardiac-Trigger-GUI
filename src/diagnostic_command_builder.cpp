@@ -15,6 +15,8 @@ constexpr auto kRuntimeExecutable =
     "build_native/inference/native_uart_live_runtime";
 constexpr auto kServiceName = "dkfz-native-uart-live";
 constexpr auto kServiceUnit = "deploy/dkfz-native-uart-live.service";
+constexpr auto kInstalledServiceUnit =
+    "/etc/systemd/system/dkfz-native-uart-live.service";
 constexpr auto kServiceConfig = "config/native_uart_live.conf";
 constexpr auto kActiveManifest = "deploy/model/model.conf";
 constexpr auto kActiveEngine = "deploy/model/model.engine";
@@ -156,6 +158,42 @@ QString diagnosticManifestPath() {
   return QString::fromLatin1(kActiveManifest);
 }
 
+QString serviceUnitRepairCommand(bool sudoPasswordProvided) {
+  const QString sudoCommand =
+      sudoPasswordProvided ? QStringLiteral("sudo -S -p '' --")
+                           : QStringLiteral("sudo -n --");
+  const QString privilegedScript =
+      QStringLiteral("ln -sfnT -- \"$1\" %1 && systemctl daemon-reload")
+          .arg(posixShellQuote(QString::fromLatin1(kInstalledServiceUnit)));
+
+  return QStringLiteral(
+             "unit_path=\"$(readlink -f -- %1 2>/dev/null)\"; "
+             "if test -z \"$unit_path\" || ! test -f \"$unit_path\" || "
+             "! test -r \"$unit_path\"; then "
+             "printf 'Checkout service unit is missing or unreadable: %1\\n' "
+             ">&2; exit 2; fi; "
+             "service_state=\"$(systemctl is-active %2.service 2>/dev/null || "
+             "true)\"; "
+             "case \"$service_state\" in "
+             "active|activating|reloading|deactivating) "
+             "printf 'Refusing to replace the unit link while %2.service is "
+             "%s. Stop it first.\\n' \"$service_state\" >&2; exit 3;; "
+             "esac; "
+             "%3 bash -c %4 bash \"$unit_path\" && "
+             "unit_fragment=\"$(systemctl show --property=FragmentPath "
+             "--value %2.service 2>/dev/null)\"; "
+             "if test -n \"$unit_fragment\" && "
+             "test \"$(readlink -f -- \"$unit_fragment\")\" = "
+             "\"$unit_path\"; then "
+             "printf 'Installed unit link now resolves to %s\\n' "
+             "\"$unit_path\"; else "
+             "printf 'The installed unit does not resolve to %s after "
+             "daemon-reload.\\n' \"$unit_path\" >&2; exit 4; fi")
+      .arg(posixShellQuote(QString::fromLatin1(kServiceUnit)),
+           QString::fromLatin1(kServiceName), sudoCommand,
+           posixShellQuote(privilegedScript));
+}
+
 QString prepareModelCommand(const DiagnosticRuntimeOptions &options) {
   QString command =
       QStringLiteral("./prepare_model.sh %1 --model-dir %2 --variant %3")
@@ -254,7 +292,8 @@ QString availabilityProbeCommand(const DiagnosticRuntimeOptions &options) {
       QStringLiteral("repo_root=\"$(pwd -P)\"; %1; ").arg(stateVariables());
   command += QStringLiteral(
       "service_installed=no; service_active=no; service_enabled=no; "
-      "service_linked=no; service_contract=no; service_validation=no; "
+      "service_unit_present=no; service_linked=no; service_contract=no; "
+      "service_validation=no; "
       "runtime_present=no; service_config_present=no; config_present=no; "
       "manifest_present=no; engine_present=no; slot_metadata=no; "
       "active_selection=no; direct_validation=no; prepare_present=no; "
@@ -262,6 +301,8 @@ QString availabilityProbeCommand(const DiagnosticRuntimeOptions &options) {
       "service_state=unknown; service_input=unknown; ");
   command +=
       QStringLiteral(
+          "if test -f %2 && test -r %2; then "
+          "service_unit_present=yes; fi; "
           "if systemctl cat %1.service >/dev/null 2>&1; then "
           "service_installed=yes; fi; "
           "service_state=\"$(systemctl is-active %1.service 2>/dev/null || "
@@ -377,6 +418,7 @@ QString availabilityProbeCommand(const DiagnosticRuntimeOptions &options) {
       "printf '__JCG_SERVICE_STATE__=%s\\n' \"$service_state\"; "
       "printf '__JCG_SERVICE_INPUT__=%s\\n' \"$service_input\"; "
       "printf '__JCG_SERVICE_ENABLED__=%s\\n' \"$service_enabled\"; "
+      "printf '__JCG_SERVICE_UNIT__=%s\\n' \"$service_unit_present\"; "
       "printf '__JCG_SERVICE_LINKED__=%s\\n' \"$service_linked\"; "
       "printf '__JCG_SERVICE_CONTRACT__=%s\\n' \"$service_contract\"; "
       "printf '__JCG_SERVICE_READY__=%s\\n' \"$service_ready\"; "

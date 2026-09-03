@@ -21,6 +21,7 @@ struct DiagnosticRuntimeOptions {
 [[nodiscard]] QString
 validateDiagnosticOptions(const DiagnosticRuntimeOptions &options);
 [[nodiscard]] QString diagnosticManifestPath();
+[[nodiscard]] QString serviceUnitRepairCommand(bool sudoPasswordProvided);
 [[nodiscard]] QString
 prepareModelCommand(const DiagnosticRuntimeOptions &options);
 [[nodiscard]] QString

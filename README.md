@@ -43,9 +43,10 @@ information. Non-JSON lines such as boot separators remain visible.
 ### Installed service
 
 Controls the checkout-linked `dkfz-native-uart-live` systemd unit. An
-availability check must find the unit before Status, Stop, Reload Unit, or
-Follow Log are enabled. Start and Restart additionally require a non-I/O
-deployment preflight and explicit hardware confirmation.
+availability check must find the checkout's deploy unit before **Install /
+repair unit link** is enabled, and must find the installed unit before Status,
+Stop, Reload Unit, or Follow Log are enabled. Start and Restart additionally
+require a non-I/O deployment preflight and explicit hardware confirmation.
 
 The preflight follows the finalized deployment contract. It verifies that the
 installed fragment resolves to `deploy/dkfz-native-uart-live.service` in the
@@ -65,10 +66,17 @@ whether systemd's runtime status says input is running or paused. A paused
 service remains healthy and should not be restarted merely because no usable
 signal is present.
 
+Install / repair unit link follows the live-stack deployment contract: while
+the service is stopped, it links the selected checkout's
+`deploy/dkfz-native-uart-live.service` into `/etc/systemd/system`, reloads
+systemd, verifies the resolved link, and automatically repeats the availability
+check. It deliberately does not enable or start the service. It also does not
+create the service account, groups, or state directory, or install the
+namespaced journald policy; those remain one-time host provisioning steps.
+
 Reload Unit runs `systemctl daemon-reload`. It is needed after editing the unit
 file, but runtime, config, manifest, and engine changes need only a service
-restart. The GUI does not install or repair the service and cannot prove
-electrical safety.
+restart. The GUI cannot prove electrical safety.
 
 ### Diagnostic / direct
 

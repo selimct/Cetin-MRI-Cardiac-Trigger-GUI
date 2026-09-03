@@ -187,11 +187,21 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
       new QCheckBox(QStringLiteral("I reviewed the installed configuration and "
                                    "verified the connected hardware"),
                     servicePage);
+  auto *serviceMaintenanceActions = new QHBoxLayout;
+  serviceInstallButton_ =
+      makeActionButton(QStringLiteral("Install / repair unit link"),
+                       servicePage);
+  serviceInstallButton_->setToolTip(QStringLiteral(
+      "Link this checkout's deploy/dkfz-native-uart-live.service into "
+      "/etc/systemd/system and reload systemd. The service must be stopped; "
+      "this does not enable or start it."));
+  serviceReloadButton_ =
+      makeActionButton(QStringLiteral("Reload unit"), servicePage);
+  serviceMaintenanceActions->addWidget(serviceInstallButton_);
+  serviceMaintenanceActions->addWidget(serviceReloadButton_);
   auto *serviceActions = new QHBoxLayout;
   serviceStatusButton_ =
       makeActionButton(QStringLiteral("Status"), servicePage);
-  serviceReloadButton_ =
-      makeActionButton(QStringLiteral("Reload unit"), servicePage);
   serviceStartButton_ = makeActionButton(QStringLiteral("Start"), servicePage);
   serviceStopButton_ = makeActionButton(QStringLiteral("Stop"), servicePage);
   serviceRestartButton_ =
@@ -199,13 +209,13 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   serviceLogsButton_ =
       makeActionButton(QStringLiteral("Follow log"), servicePage);
   serviceActions->addWidget(serviceStatusButton_);
-  serviceActions->addWidget(serviceReloadButton_);
   serviceActions->addWidget(serviceStartButton_);
   serviceActions->addWidget(serviceStopButton_);
   serviceActions->addWidget(serviceRestartButton_);
   serviceActions->addWidget(serviceLogsButton_);
   serviceLayout->addWidget(serviceAvailabilityLabel_);
   serviceLayout->addWidget(serviceSafetyCheck_);
+  serviceLayout->addLayout(serviceMaintenanceActions);
   serviceLayout->addLayout(serviceActions);
   serviceLayout->addStretch();
   operationsTabs_->addTab(servicePage, QStringLiteral("Installed service"));
@@ -425,6 +435,31 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
                        "code=$?; test \"$code\" -eq 0 || test \"$code\" -eq 3")
             .arg(kServiceName));
   });
+  connect(serviceInstallButton_, &QPushButton::clicked, this, [this] {
+    if (capabilities_.serviceActive) {
+      statusLabel_->setText(
+          QStringLiteral("Stop the service before repairing its unit link."));
+      return;
+    }
+
+    const QString remoteRoot = remoteDirectoryEdit_->text().trimmed();
+    const auto answer = QMessageBox::question(
+        this, QStringLiteral("Install or repair unit link"),
+        QStringLiteral(
+            "Replace the installed systemd unit with a link to the deploy "
+            "unit in:\n%1\n\nSystemd will be reloaded. The service will not "
+            "be enabled or started.")
+            .arg(remoteRoot),
+        QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel);
+    if (answer != QMessageBox::Ok) {
+      return;
+    }
+
+    runCommand(
+        QStringLiteral("Install or repair service unit link"),
+        serviceUnitRepairCommand(!sudoPasswordEdit_->text().isEmpty()),
+        TaskKind::serviceUnitRepair);
+  });
   connect(serviceReloadButton_, &QPushButton::clicked, this, [this] {
     runCommand(
         QStringLiteral("Reload systemd unit"),
@@ -595,6 +630,9 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
             QString displayCommand = command;
             if (activeTask_ == TaskKind::availabilityProbe) {
               displayCommand = QStringLiteral("[availability preflight]");
+            } else if (activeTask_ == TaskKind::serviceUnitRepair) {
+              displayCommand =
+                  QStringLiteral("[install/repair service unit link]");
             } else if (activeTask_ == TaskKind::directInference) {
               displayCommand = QStringLiteral("[managed direct inference]");
             }
@@ -778,7 +816,8 @@ void MainWindow::runCommand(const QString &label, const QString &command,
   activeTask_ = kind;
   statusLabel_->setText(QStringLiteral("Starting %1…").arg(label));
   QByteArray standardInput;
-  if (kind == TaskKind::serviceMutation &&
+  if ((kind == TaskKind::serviceMutation ||
+       kind == TaskKind::serviceUnitRepair) &&
       !sudoPasswordEdit_->text().isEmpty()) {
     standardInput = sudoPasswordEdit_->text().toUtf8();
     standardInput.append('\n');
@@ -950,6 +989,7 @@ void MainWindow::applyAvailabilityProbe(const QByteArray &output) {
   capabilities_.service = present("__JCG_SERVICE__");
   capabilities_.serviceActive = present("__JCG_SERVICE_ACTIVE__");
   capabilities_.serviceEnabled = present("__JCG_SERVICE_ENABLED__");
+  capabilities_.serviceUnit = present("__JCG_SERVICE_UNIT__");
   capabilities_.serviceLinkedToCheckout = present("__JCG_SERVICE_LINKED__");
   capabilities_.serviceContract = present("__JCG_SERVICE_CONTRACT__");
   capabilities_.serviceReady = present("__JCG_SERVICE_READY__");
@@ -1031,9 +1071,23 @@ void MainWindow::applyAvailabilityProbe(const QByteArray &output) {
         QStringLiteral("The unit is installed but %1. Start and Restart "
                        "remain disabled.")
             .arg(reasons.join(QStringLiteral("; "))));
+    if (!capabilities_.serviceLinkedToCheckout && capabilities_.serviceUnit) {
+      serviceAvailabilityLabel_->setText(
+          serviceAvailabilityLabel_->text() +
+          QStringLiteral(
+              " Stop the service, then select Install / repair unit link."));
+    }
   } else {
-    serviceAvailabilityLabel_->setText(QStringLiteral(
-        "The systemd unit is not installed. Service actions remain disabled."));
+    serviceAvailabilityLabel_->setText(
+        capabilities_.serviceUnit
+            ? QStringLiteral(
+                  "The systemd unit is not installed. Select Install / repair "
+                  "unit link to link this checkout; service actions remain "
+                  "disabled.")
+            : QStringLiteral(
+                  "The systemd unit is not installed, and this checkout's "
+                  "deploy unit is missing or unreadable. Service actions "
+                  "remain disabled."));
   }
 
   QStringList available;
@@ -1107,6 +1161,9 @@ void MainWindow::updateActionAvailability() {
   healthButton_->setEnabled(!anyBusy);
 
   serviceStatusButton_->setEnabled(!anyBusy && capabilities_.service);
+  serviceInstallButton_->setEnabled(
+      !anyBusy && capabilities_.known && capabilities_.serviceUnit &&
+      !capabilities_.serviceActive && !capabilities_.directInferenceActive);
   serviceReloadButton_->setEnabled(!anyBusy && capabilities_.service);
   serviceSafetyCheck_->setEnabled(!anyBusy && capabilities_.serviceReady);
   serviceStartButton_->setEnabled(
@@ -1187,6 +1244,9 @@ void MainWindow::finishMainCommand(int exitCode,
                                    QProcess::ExitStatus exitStatus,
                                    bool cancelled) {
   const TaskKind completedTask = activeTask_;
+  const bool repairSucceeded =
+      completedTask == TaskKind::serviceUnitRepair && !cancelled &&
+      exitStatus == QProcess::NormalExit && exitCode == 0;
   if (completedTask != TaskKind::availabilityProbe) {
     flushClassifiedConsoleBytes(mainStandardOutputDisplayBuffer_);
   }
@@ -1219,7 +1279,8 @@ void MainWindow::finishMainCommand(int exitCode,
       exitStatus == QProcess::NormalExit && exitCode == 0) {
     invalidateAvailability();
   }
-  if (completedTask == TaskKind::serviceMutation &&
+  if ((completedTask == TaskKind::serviceMutation ||
+       completedTask == TaskKind::serviceUnitRepair) &&
       exitStatus == QProcess::NormalExit && exitCode == 0) {
     invalidateAvailability();
   }
@@ -1241,4 +1302,7 @@ void MainWindow::finishMainCommand(int exitCode,
   }
   activeTask_ = TaskKind::none;
   updateActionAvailability();
+  if (repairSucceeded && !unknownHostKey) {
+    checkAvailability();
+  }
 }
