@@ -5,7 +5,7 @@ Developed at the German Cancer Research Center (DKFZ).
 -->
 
 [![Source Code](https://raw.githubusercontent.com/selimct/DKFZ-MRI-Cardiac-Trigger-GUI/refs/heads/main/packaging/source-badge.svg)](https://github.com/selimct/Cetin-Cardiac-Trigger-SourceCode.git)
-[![Data](https://raw.githubusercontent.com/selimct/DKFZ-MRI-Cardiac-Trigger-GUI/refs/heads/main/packaging/github-badge.svg)](https://github.com/selimct/Cetin-UHF-ECGPOX-Data.git)
+[![Data](https://raw.githubusercontent.com/selimct/DKFZ-MRI-Cardiac-Trigger-GUI/refs/heads/main/packaging/data-badge.svg)](https://github.com/selimct/Cetin-UHF-ECGPOX-Data.git)
 [![ParquetPlot](https://raw.githubusercontent.com/selimct/ParquetPlot/refs/heads/main/resources/parquetplot-gitlab-badge.svg)](https://github.com/selimct/ParquetPlot)
 [![ParquetViewer](https://raw.githubusercontent.com/selimct/ParquetViewer/refs/heads/main/packaging/parquetviewer-gitlab-badge.svg)](https://github.com/selimct/ParquetViewer)
 
