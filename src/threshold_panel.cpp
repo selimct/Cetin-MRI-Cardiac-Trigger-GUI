@@ -59,6 +59,7 @@ ThresholdPanel::ThresholdPanel(ThresholdController *controller, QWidget *parent)
     fp_ = new QPushButton("Use Historical FP-first", this);
     reset_ = new QPushButton("Restore automatic", this);
     refresh_ = new QPushButton("Refresh deployed thresholds", this);
+    refresh_->setObjectName("refreshThresholds");
     buttons->addWidget(der_);
     buttons->addWidget(fp_);
     buttons->addWidget(reset_);
@@ -70,7 +71,7 @@ ThresholdPanel::ThresholdPanel(ThresholdController *controller, QWidget *parent)
                        "Smaller peaks still wait for the selected detection threshold.");
     layout->addWidget(early_);
     auto *help = label(this);
-    help->setText("Numeric choices are manual snapshots. Early emission changes trigger timing; calibration error counts do not measure live performance with it enabled. Effective policy changes clear an unfinished trigger candidate. Application waits for native readback and may wait for input.");
+    help->setText("Numeric choices are manual snapshots. Early emission changes trigger timing; calibration error counts do not measure live performance with it enabled. Effective policy changes clear an unfinished trigger candidate. After applying, click Refresh deployed thresholds to check native readback; confirmation may wait for input. Status is never polled automatically.");
     layout->addWidget(help);
     layout->addStretch();
     connect(refresh_, &QPushButton::clicked, controller_, &ThresholdController::refresh);
@@ -102,7 +103,8 @@ void ThresholdPanel::update()
     status_->setText(controller_->status());
     const bool ready = controller_->ready();
     apply_->setEnabled(ready);
-    custom_->setEnabled(ready);
+    // This is an unsaved draft. Refreshes and pending writes must not interrupt
+    // typing or steal focus; only submitting the value requires readiness.
     der_->setEnabled(ready && m.der.has_value());
     fp_->setEnabled(ready && m.fp.has_value());
     reset_->setEnabled(ready && controller_->canReset());

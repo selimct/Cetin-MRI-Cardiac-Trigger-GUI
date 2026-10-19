@@ -16,6 +16,7 @@ private slots:
   void resolvesActiveManifest();
   void buildsServiceUnitRepairCommand();
   void buildsPreparationCommand();
+  void buildsReexportCommand();
   void buildsSafeDirectRuntimeCommand();
   void validatesInputRecoveryContract();
   void buildsAvailabilityProbe();
@@ -133,6 +134,21 @@ void DiagnosticCommandBuilderTest::buildsSafeDirectRuntimeCommand() {
   QVERIFY(command.contains(QStringLiteral("native_uart_live_runtime.pid")));
 }
 
+void DiagnosticCommandBuilderTest::buildsReexportCommand() {
+  const DiagnosticRuntimeOptions options{
+      .modelName = QStringLiteral("declared_name"),
+      .modelDirectory = QStringLiteral("finished_models/folder with ' quote"),
+      .variant = QStringLiteral("tuned"),
+  };
+  const auto command = reexportModelCommand(options);
+  QVERIFY(command.contains(QStringLiteral("./prepare_model.sh 'declared_name'")));
+  QVERIFY(command.contains(QStringLiteral("--variant 'tuned'")));
+  QVERIFY(!command.contains(QStringLiteral("--jetson-only")));
+  QVERIFY(!command.contains(QStringLiteral("--engine")));
+  QVERIFY(command.contains(QStringLiteral("systemctl is-active")));
+  QVERIFY(command.contains(QStringLiteral("native_uart_live_runtime.pid")));
+}
+
 void DiagnosticCommandBuilderTest::buildsAvailabilityProbe() {
   DiagnosticRuntimeOptions options{
       .modelName = QStringLiteral("target_r"),
@@ -153,6 +169,8 @@ void DiagnosticCommandBuilderTest::buildsAvailabilityProbe() {
   QVERIFY(command.contains(QStringLiteral("__JCG_ACTIVE_SELECTION__")));
   QVERIFY(command.contains(QStringLiteral("__JCG_DIRECT_READY__")));
   QVERIFY(command.contains(QStringLiteral("__JCG_PREPARE_INPUTS__")));
+  QVERIFY(command.contains(QStringLiteral("__JCG_REEXPORT_INPUTS__")));
+  QVERIFY(command.contains(QStringLiteral("__JCG_FINISHED_MODELS__")));
   QVERIFY(command.contains(QStringLiteral("deploy/model/model.conf")));
   QVERIFY(
       command.contains(QStringLiteral("models_noCV/target_r/target_r.onnx")));
@@ -202,6 +220,7 @@ void DiagnosticCommandBuilderTest::generatedCommandsParseAsBash() {
       startDirectRuntimeCommand(options), stopDirectRuntimeCommand(),
       serviceUnitRepairCommand(false),    serviceUnitRepairCommand(true),
       availabilityProbeCommand(options), rebuildRuntimeCommand(),
+      finishedModelsCommand(), reexportModelCommand(options),
   };
 
   for (const QString &command : commands) {

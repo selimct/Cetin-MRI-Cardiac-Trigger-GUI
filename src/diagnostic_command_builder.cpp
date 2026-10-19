@@ -7,6 +7,9 @@
 #include "ssh_command_builder.h"
 
 #include <QDir>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QRegularExpression>
 #include <QStringList>
 
@@ -206,6 +209,69 @@ QString prepareModelCommand(const DiagnosticRuntimeOptions &options) {
   return command;
 }
 
+QString finishedModelsCommand() {
+  // Read the declared model name, which need not match its directory name.
+  // Encode the catalog so paths and JSON cannot collide with probe markers.
+  const QString script = QString::fromUtf8(R"PY(
+import base64, json, pathlib, re, sys
+models = []
+root = pathlib.Path('finished_models')
+for directory in sorted(root.iterdir()) if root.is_dir() else []:
+    if not directory.is_dir():
+        continue
+    for variant, config, weights in [('best', 'train_config.json', 'best.pth'),
+                                     ('tuned', 'tuning/tuned_config.json', 'best_tuned.pth')]:
+        if not (directory / config).is_file() or not (directory / weights).is_file():
+            continue
+        try:
+            name = json.loads((directory / config).read_text(encoding='utf-8')).get('modelname', '')
+            if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9._-]+', name):
+                raise ValueError('invalid modelname')
+            models.append(dict(name=name, directory=directory.as_posix(), variant=variant))
+        except (OSError, ValueError, AttributeError) as error:
+            print(f'Skipping {directory / config}: {error}', file=sys.stderr)
+print('__JCG_FINISHED_MODELS__=' + base64.b64encode(json.dumps(models).encode()).decode())
+)PY");
+  return QStringLiteral("python3 -c %1").arg(posixShellQuote(script));
+}
+
+QList<FinishedModel> parseFinishedModels(const QByteArray &output) {
+  QList<FinishedModel> result;
+  for (const auto &line : output.split('\n')) {
+    const QByteArray prefix = "__JCG_FINISHED_MODELS__=";
+    if (!line.startsWith(prefix)) continue;
+    const auto entries = QJsonDocument::fromJson(
+        QByteArray::fromBase64(line.mid(prefix.size()))).array();
+    for (const auto &entry : entries) {
+      const auto object = entry.toObject();
+      FinishedModel model{object.value("name").toString(),
+                          object.value("directory").toString(),
+                          object.value("variant").toString()};
+      DiagnosticRuntimeOptions options;
+      options.modelName = model.name;
+      options.modelDirectory = model.directory;
+      options.variant = model.variant;
+      if (model.directory.startsWith("finished_models/") &&
+          validateDiagnosticOptions(options).isEmpty()) result.append(model);
+    }
+  }
+  return result;
+}
+
+QString reexportModelCommand(const DiagnosticRuntimeOptions &options) {
+  auto complete = options;
+  complete.preparationMode = QStringLiteral("complete");
+  return QStringLiteral(
+             "service_state=\"$(systemctl is-active %1.service 2>/dev/null || true)\"; "
+             "case \"$service_state\" in active|activating|reloading|deactivating) "
+             "printf 'Stop the service before re-exporting a model.\\n' >&2; exit 3;; esac; "
+             "%2; if test -s \"$pid_file\" && "
+             "kill -0 \"$(cat -- \"$pid_file\")\" 2>/dev/null; then "
+             "printf 'Stop direct inference before re-exporting a model.\\n' >&2; exit 3; fi; "
+             "%3")
+      .arg(QString::fromLatin1(kServiceName), stateVariables(), prepareModelCommand(complete));
+}
+
 QString validateRuntimeCommand(const DiagnosticRuntimeOptions &options) {
   return runtimeBaseCommand(options) +
          QStringLiteral(" --validate-only --check-engine && ") +
@@ -280,6 +346,8 @@ QString availabilityProbeCommand(const DiagnosticRuntimeOptions &options) {
   const QString variant = posixShellQuote(options.variant);
   const QString directValidation = validateRuntimeCommand(options);
   const QString preparationInputs = preparationInputCheck(options);
+  auto complete = options;
+  complete.preparationMode = QStringLiteral("complete");
   const QString service = QString::fromLatin1(kServiceName);
   const QString runtime = QString::fromLatin1(kRuntimeExecutable);
   const QString serviceUnit = QString::fromLatin1(kServiceUnit);
@@ -438,6 +506,10 @@ QString availabilityProbeCommand(const DiagnosticRuntimeOptions &options) {
       "printf '__JCG_PREPARE_INPUTS__=%s\\n' \"$prepare_inputs\"; "
       "printf '__JCG_REBUILD__=%s\\n' \"$rebuild_present\"; "
       "printf '__JCG_DIRECT_ACTIVE__=%s\\n' \"$direct_active\"");
+  command += QStringLiteral("; if %1; then printf '__JCG_REEXPORT_INPUTS__=yes\\n'; "
+                            "else printf '__JCG_REEXPORT_INPUTS__=no\\n'; fi; ")
+                 .arg(preparationInputCheck(complete));
+  command += finishedModelsCommand();
   return command;
 }
 

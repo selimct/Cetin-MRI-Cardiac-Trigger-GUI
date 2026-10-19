@@ -6,7 +6,6 @@
 
 #include "remote_command_runner.h"
 #include "threshold_state.h"
-#include <QTimer>
 
 // GUI backend. All host I/O uses the existing OpenSSH/sudo transport, never the
 // desktop filesystem. The audit is local to this GUI user and remote endpoint.
@@ -22,7 +21,7 @@ public:
     void apply(const QString &source, const QString &custom = {});
     void restoreAutomatic();
     void setEarlyEmission(bool enabled);
-    bool blocking() const { return pending_ || phase_ == Phase::write; }
+    bool blocking() const { return phase_ != Phase::idle; }
     bool ready() const { return valid_ && !externalBusy_ && phase_ == Phase::idle && !pending_; }
     bool policyAvailable() const { return valid_ && !policyPath_.isEmpty() && manifest_.fingerprinted(); }
     bool canReset() const { return valid_ && (policyPath_.isEmpty() ? disabledAtStartup_ : manifest_.fingerprinted()); }
@@ -59,7 +58,6 @@ private:
     void consumeJournal(const QByteArray &journal);
     void fail(const QString &error);
     RemoteCommandRunner runner_;
-    QTimer poll_;
     SshConnectionOptions connection_;
     QString password_;
     Phase phase_{Phase::idle};

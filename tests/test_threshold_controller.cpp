@@ -86,7 +86,7 @@ private slots:
                                                   "\nUser=" + qgetenv("USER") + "\nGroup=" + qgetenv("USER") + "\nLogNamespace=test\nNeedDaemonReload=no\n");
         // The test transport runs the GUI's exact commands against this isolated directory.
         // Remove only the remote login-shell behavior so the fake host tools stay on PATH.
-        writeFile(bin + "/ssh", "#!/bin/bash\nlast=${@: -1}\nlast=${last/exec bash -lc/exec bash -c}\nexec bash -c \"$last\"\n", true);
+        writeFile(bin + "/ssh", "#!/bin/bash\nprintf 'ssh\\n' >> " + posixShellQuote(dir.filePath("ssh.calls")).toUtf8() + "\nlast=${@: -1}\nlast=${last/exec bash -lc/exec bash -c}\nexec bash -c \"$last\"\n", true);
         writeFile(bin + "/sudo", "#!/bin/bash\nwhile [[ $1 != -- ]]; do shift; done\nshift\nexec \"$@\"\n", true);
         writeFile(bin + "/systemctl", "#!/bin/bash\nif [[ $* == *--value* ]]; then\n"
                                       "if [[ $* == *InvocationID* ]]; then cat invocation; else echo " +
@@ -123,12 +123,32 @@ private slots:
         QVERIFY(input);
         QVERIFY(apply);
         QVERIFY(checkbox);
+        const auto refresh = [](ThresholdController &target) {
+            target.refresh();
+            QTRY_VERIFY_WITH_TIMEOUT(!target.blocking(), 5000);
+        };
+        QVERIFY(readFile(dir.filePath("ssh.calls")).isEmpty());
         status(0.246, false, 0.246, true);
-        controller.refresh();
+        refresh(controller);
         QTRY_VERIFY_WITH_TIMEOUT(controller.ready(), 5000);
         QCOMPARE(*controller.readback().active, 0.246);
         input->setText("0.1"); // No write on editing.
         QCOMPARE(readFile(manifest), original);
+        // Refreshing is a read-only operation and must never interrupt a draft.
+        bool draftDisabled = false;
+        const auto observeDraft = connect(&controller, &ThresholdController::changed, &panel,
+            [&] { draftDisabled = draftDisabled || !input->isEnabled(); });
+        controller.refresh();
+        QVERIFY(!controller.ready());
+        QVERIFY(input->isEnabled());
+        QTRY_VERIFY_WITH_TIMEOUT(controller.ready(), 5000);
+        const auto idleCalls = readFile(dir.filePath("ssh.calls"));
+        QTest::qWait(3300); // Waiting past the old polling interval sends nothing.
+        QCOMPARE(readFile(dir.filePath("ssh.calls")), idleCalls);
+        QVERIFY(controller.ready());
+        QVERIFY(!draftDisabled);
+        QCOMPARE(input->text(), QString("0.1"));
+        disconnect(observeDraft);
         input->setText("NaN");
         apply->click();
         QCOMPARE(readFile(manifest), original);
@@ -137,13 +157,20 @@ private slots:
         controller.apply("der_preset");
         QTRY_VERIFY_WITH_TIMEOUT(readFile(manifest).contains("manual_threshold=0.246"), 5000);
         QTRY_VERIFY_WITH_TIMEOUT(controller.status() == "Saved/Pending", 5000);
-        QVERIFY(controller.blocking());
+        QVERIFY(!controller.blocking());
+        auto *refreshButton = panel.findChild<QPushButton *>("refreshThresholds");
+        QVERIFY(refreshButton && refreshButton->isEnabled());
+        const auto savedCalls = readFile(dir.filePath("ssh.calls"));
+        QTest::qWait(200);
+        QCOMPARE(readFile(dir.filePath("ssh.calls")), savedCalls);
+        QVERIFY(input->isEnabled()); // Preparing the next draft is harmless.
+        QVERIFY(!apply->isEnabled());
         event("manual_threshold_configured", {{"manual_override_configured", true}, {"configured_threshold", 0.246}});
-        controller.refresh();
+        refresh(controller);
         QTRY_VERIFY_WITH_TIMEOUT(controller.status() == "Saved/Pending", 5000);
         QVERIFY(controller.status() != "Applied");
         status(0.246, true, 0.246, true);
-        controller.refresh();
+        refresh(controller);
         QTRY_COMPARE_WITH_TIMEOUT(controller.status(), QString("Applied"), 5000);
         QCOMPARE(controller.savedSource(), QString("Manual (DER preset)"));
         const auto records = QJsonDocument::fromJson(readFile(controller.auditPath())).array();
@@ -153,11 +180,11 @@ private slots:
         controller.apply("der_preset");
         QTRY_COMPARE_WITH_TIMEOUT(controller.status(), QString("Saved/Pending"), 5000);
         event("runtime_status", {{"threshold", 0.246}, {"manual_override_configured", true}, {"configured_threshold", 0.246}, {"early_emission", true}}, "22222222222222222222222222222222");
-        controller.refresh();
+        refresh(controller);
         QTest::qWait(200);
         QVERIFY(controller.status() != "Applied");
         status(0.246, true, 0.246, true);
-        controller.refresh();
+        refresh(controller);
         QTRY_COMPARE_WITH_TIMEOUT(controller.status(), QString("Applied"), 5000);
         // Checkbox-only operation writes a six-field policy, retaining manual contents.
         const auto beforeCheckbox = readFile(manifest);
@@ -167,26 +194,26 @@ private slots:
         QCOMPARE(readFile(manifest), beforeCheckbox);
         QCOMPARE(thresholds::settings(readFile(policy)).size(), 6);
         status(0.246, true, 0.246, false);
-        controller.refresh();
+        refresh(controller);
         QTRY_COMPARE_WITH_TIMEOUT(controller.status(), QString("Applied"), 5000);
         // Reset a stale fallback first, then clear manual; preserve the saved checkbox choice.
         auto stalePolicy = readFile(policy);
         stalePolicy.replace("threshold=0.246", "threshold=0.9");
         writeFile(policy, stalePolicy);
-        controller.refresh();
+        refresh(controller);
         QTRY_VERIFY_WITH_TIMEOUT(controller.savedPolicy().contains("0.9"), 5000);
         QTRY_VERIFY_WITH_TIMEOUT(controller.ready(), 5000);
         controller.restoreAutomatic();
         QTRY_COMPARE_WITH_TIMEOUT(controller.status(), QString("Saved/Pending"), 5000);
-        QTRY_VERIFY_WITH_TIMEOUT(!controller.manifest().manual, 5000);
+        QVERIFY(!thresholds::Manifest::parse(readFile(manifest)).manual);
         QVERIFY(readFile(policy).contains("threshold=0.246\n"));
         QVERIFY(readFile(policy).contains("early_emission=false\n"));
         status(0.246, false, 0.246, false);
-        controller.refresh();
+        refresh(controller);
         QTRY_COMPARE_WITH_TIMEOUT(controller.status(), QString("Applied"), 5000);
         // An earlier equal-valued preset record cannot restore provenance across a reset.
         writeFile(manifest, thresholds::Manifest::parse(readFile(manifest)).patchManual("0.246"));
-        controller.refresh();
+        refresh(controller);
         QTRY_VERIFY_WITH_TIMEOUT(controller.manifest().manual.has_value(), 5000);
         QTRY_VERIFY_WITH_TIMEOUT(controller.ready(), 5000);
         QCOMPARE(controller.savedSource(), QString("Manual (source unknown)"));
@@ -195,30 +222,30 @@ private slots:
         apply->click();
         QTRY_COMPARE_WITH_TIMEOUT(controller.status(), QString("Saved/Pending"), 5000);
         status(0.246, true, 0.1, false, true);
-        controller.refresh();
+        refresh(controller);
         QTRY_VERIFY_WITH_TIMEOUT(controller.status().startsWith("Waiting for input"), 5000);
         QCOMPARE(*controller.readback().active, 0.246);
         event("manual_threshold_rejected", {{"message", "Only manual_threshold may change"}});
-        controller.refresh();
+        refresh(controller);
         QTRY_VERIFY_WITH_TIMEOUT(controller.status().startsWith("Rejected"), 5000);
         QCOMPARE(*controller.manifest().manual, 0.1);
         QCOMPARE(*controller.readback().active, 0.246);
         // Reconnect restores source only from the matching durable GUI audit.
         ThresholdController reconnected;
         reconnected.configure(connection, {});
-        reconnected.refresh();
+        refresh(reconnected);
         QTRY_VERIFY_WITH_TIMEOUT(reconnected.ready(), 5000);
         QCOMPARE(reconnected.savedSource(), QString("Manual (custom)"));
         writeFile(manifest, thresholds::Manifest::parse(readFile(manifest)).patchManual("0.37"));
-        reconnected.refresh();
+        refresh(reconnected);
         QTRY_VERIFY_WITH_TIMEOUT(reconnected.manifest().manual && *reconnected.manifest().manual == 0.37, 5000);
         QCOMPARE(reconnected.savedSource(), QString("Manual (source unknown)"));
         // Missing status times out honestly and remains distinguishable from rejection.
         reconnected.apply("fp_preset");
         QTRY_COMPARE_WITH_TIMEOUT(reconnected.status(), QString("Saved/Pending"), 5000);
-        QTRY_COMPARE_WITH_TIMEOUT(reconnected.manifest().values.value("manual_threshold"), QString("0.40812345678901234"), 5000);
+        QCOMPARE(thresholds::Manifest::parse(readFile(manifest)).values.value("manual_threshold"), QString("0.40812345678901234"));
         writeFile(dir.filePath("clock_override"), QByteArray::number(QDateTime::currentMSecsSinceEpoch() * 1000 + 200000000));
-        reconnected.refresh();
+        refresh(reconnected);
         QTRY_VERIFY_WITH_TIMEOUT(reconnected.status().startsWith("Unconfirmed/stale"), 5000);
         QVERIFY(!reconnected.blocking());
         QFile::remove(dir.filePath("clock_override"));
@@ -226,10 +253,10 @@ private slots:
         reconnected.apply("custom", "0.2");
         QTRY_COMPARE_WITH_TIMEOUT(reconnected.status(), QString("Saved/Pending"), 5000);
         auto props = readFile(dir.filePath("properties"));
-        props.replace("11111111111111111111111111111111", "22222222222222222222222222222222");
+        props.replace("11111111111111111111111111111111", "33333333333333333333333333333333");
         writeFile(dir.filePath("properties"), props);
-        writeFile(dir.filePath("invocation"), "22222222222222222222222222222222\n");
-        reconnected.refresh();
+        writeFile(dir.filePath("invocation"), "33333333333333333333333333333333\n");
+        refresh(reconnected);
         QTRY_VERIFY_WITH_TIMEOUT(!reconnected.blocking(), 5000);
         QVERIFY(!reconnected.readback().active);
         QVERIFY(reconnected.status().startsWith("Unconfirmed/stale"));
@@ -237,11 +264,11 @@ private slots:
         auto newModel = original;
         newModel.replace("model_name=heart", "model_name=new-heart");
         writeFile(manifest, newModel);
-        reconnected.refresh();
+        refresh(reconnected);
         QTRY_COMPARE_WITH_TIMEOUT(reconnected.manifest().values.value("model_name"), QString("new-heart"), 5000);
         QVERIFY(!reconnected.manifest().manual);
         writeFile(dir.filePath("journal_error"), "fail");
-        reconnected.refresh();
+        refresh(reconnected);
         QTRY_VERIFY_WITH_TIMEOUT(reconnected.status().contains("status reporting unavailable"), 5000);
 #endif
     }

@@ -4,7 +4,18 @@
 
 #pragma once
 
+#include <QByteArray>
+#include <QList>
 #include <QString>
+
+struct FinishedModel {
+  QString name;
+  QString directory;
+  QString variant;
+};
+
+[[nodiscard]] QString finishedModelsCommand();
+[[nodiscard]] QList<FinishedModel> parseFinishedModels(const QByteArray &output);
 
 struct DiagnosticRuntimeOptions {
   QString modelName;
@@ -24,6 +35,8 @@ validateDiagnosticOptions(const DiagnosticRuntimeOptions &options);
 [[nodiscard]] QString serviceUnitRepairCommand(bool sudoPasswordProvided);
 [[nodiscard]] QString
 prepareModelCommand(const DiagnosticRuntimeOptions &options);
+[[nodiscard]] QString
+reexportModelCommand(const DiagnosticRuntimeOptions &options);
 [[nodiscard]] QString
 validateRuntimeCommand(const DiagnosticRuntimeOptions &options);
 [[nodiscard]] QString

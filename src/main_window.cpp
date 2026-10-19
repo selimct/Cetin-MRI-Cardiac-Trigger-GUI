@@ -25,6 +25,7 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QSignalBlocker>
 #include <QSpinBox>
 #include <QTabWidget>
 #include <QTextCharFormat>
@@ -241,15 +242,31 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   auto *runtimeForm = new QFormLayout;
   deploymentForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
   runtimeForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+  finishedModelCombo_ = new QComboBox(diagnosticPage);
+  finishedModelCombo_->setObjectName(QStringLiteral("finishedModelSelection"));
+  finishedModelCombo_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+  finishedModelCombo_->setMinimumContentsLength(22);
+  finishedModelCombo_->addItem(QStringLiteral("Select a finished model…"));
+  finishedModelCombo_->setToolTip(QStringLiteral(
+      "Models with saved weights and training configuration in the Jetson's "
+      "finished_models directory. Select Refresh models or Check to load."));
+  refreshModelsButton_ = new QPushButton(QStringLiteral("Refresh models"), diagnosticPage);
+  refreshModelsButton_->setObjectName(QStringLiteral("refreshFinishedModels"));
+  auto *modelSelectionRow = new QHBoxLayout;
+  modelSelectionRow->addWidget(finishedModelCombo_, 1);
+  modelSelectionRow->addWidget(refreshModelsButton_);
   modelNameEdit_ = new QLineEdit(QStringLiteral("target_r"), diagnosticPage);
+  modelNameEdit_->setObjectName(QStringLiteral("modelName"));
   modelNameEdit_->setToolTip(QStringLiteral(
       "The modelname declared by the selected training configuration."));
   modelDirectoryEdit_ =
       new QLineEdit(QStringLiteral("finished_models/target_r"), diagnosticPage);
+  modelDirectoryEdit_->setObjectName(QStringLiteral("modelDirectory"));
   modelDirectoryEdit_->setToolTip(QStringLiteral(
       "Exact source directory beneath the remote project root. Use this for "
       "alternate roots such as models_noCV/target_r."));
   variantCombo_ = new QComboBox(diagnosticPage);
+  variantCombo_->setObjectName(QStringLiteral("modelVariant"));
   variantCombo_->addItems({QStringLiteral("best"), QStringLiteral("tuned")});
   preparationModeCombo_ = new QComboBox(diagnosticPage);
   preparationModeCombo_->addItem(
@@ -291,6 +308,7 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
                     diagnosticPage);
   gpioSafetyCheck_->setEnabled(false);
 
+  deploymentForm->addRow(QStringLiteral("Finished models"), modelSelectionRow);
   deploymentForm->addRow(QStringLiteral("Model name"), modelNameEdit_);
   deploymentForm->addRow(QStringLiteral("Model source directory"),
                          modelDirectoryEdit_);
@@ -319,6 +337,15 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
       "Runs prepare_model.sh with the exact source directory and replaces "
       "deploy/model only after validation. The systemd service must be "
       "stopped."));
+  reexportModelButton_ = makeActionButton(
+      QStringLiteral("Re-export weights + activate"), diagnosticPage);
+  reexportModelButton_->setObjectName(QStringLiteral("reexportModel"));
+  reexportModelButton_->setToolTip(QStringLiteral(
+      "Export the selected saved PTH weights to ONNX, run parity checks, build "
+      "TensorRT, and activate deploy/model. Select Check afterward to refresh readiness. "
+      "Requires the full Jetson Python environment and a built runtime. Stop "
+      "the service and direct inference first."));
+  deploymentForm->addRow(reexportModelButton_);
   validateRuntimeButton_ = makeActionButton(
       QStringLiteral("Validate config + engine"), diagnosticPage);
   startInferenceButton_ = makeActionButton(
@@ -507,6 +534,29 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
         TaskKind::serviceLogs);
   });
 
+  connect(refreshModelsButton_, &QPushButton::clicked, this, [this] {
+    runCommand(QStringLiteral("List finished models"), finishedModelsCommand(), TaskKind::listModels);
+  });
+  connect(finishedModelCombo_, qOverload<int>(&QComboBox::activated), this, [this](int index) {
+    if (index <= 0 || index > finishedModels_.size()) return;
+    const auto model = finishedModels_.at(index - 1);
+    modelDirectoryFollowsName_ = false;
+    modelNameEdit_->setText(model.name);
+    modelDirectoryEdit_->setText(model.directory);
+    variantCombo_->setCurrentText(model.variant);
+    syncFinishedModelSelection();
+  });
+  connect(reexportModelButton_, &QPushButton::clicked, this, [this] {
+    auto options = diagnosticOptions();
+    options.preparationMode = QStringLiteral("complete");
+    const QString error = validateDiagnosticOptions(options);
+    if (!error.isEmpty()) {
+      statusLabel_->setText(error);
+      return;
+    }
+    runCommand(QStringLiteral("Re-export and activate model on Jetson"),
+               reexportModelCommand(options), TaskKind::reexportModel);
+  });
   connect(prepareModelButton_, &QPushButton::clicked, this, [this] {
     const auto options = diagnosticOptions();
     const QString error = validateDiagnosticOptions(options);
@@ -571,6 +621,7 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   const auto invalidate = [this] { invalidateAvailability(); };
   const auto invalidateConnection = [this] {
     sudoPasswordEdit_->clear();
+    applyFinishedModels({});
     invalidateAvailability();
   };
   connect(hostEdit_, &QLineEdit::textChanged, this, invalidateConnection);
@@ -579,7 +630,10 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
           invalidateConnection);
   connect(identityFileEdit_, &QLineEdit::textChanged, this,
           invalidateConnection);
-  connect(remoteDirectoryEdit_, &QLineEdit::textChanged, this, invalidate);
+  connect(remoteDirectoryEdit_, &QLineEdit::textChanged, this, [this, invalidate] {
+    applyFinishedModels({});
+    invalidate();
+  });
   connect(modelNameEdit_, &QLineEdit::textChanged, this,
           [this, invalidate](const QString &name) {
             if (modelDirectoryFollowsName_) {
@@ -592,6 +646,9 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
           [this] { modelDirectoryFollowsName_ = false; });
   connect(modelDirectoryEdit_, &QLineEdit::textChanged, this, invalidate);
   connect(variantCombo_, &QComboBox::currentTextChanged, this, invalidate);
+  connect(modelNameEdit_, &QLineEdit::textChanged, this, &MainWindow::syncFinishedModelSelection);
+  connect(modelDirectoryEdit_, &QLineEdit::textChanged, this, &MainWindow::syncFinishedModelSelection);
+  connect(variantCombo_, &QComboBox::currentTextChanged, this, &MainWindow::syncFinishedModelSelection);
   connect(preparationModeCombo_,
           qOverload<int>(&QComboBox::currentIndexChanged), this,
           [invalidate] { invalidate(); });
@@ -633,6 +690,8 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
             QString displayCommand = command;
             if (activeTask_ == TaskKind::availabilityProbe) {
               displayCommand = QStringLiteral("[availability preflight]");
+            } else if (activeTask_ == TaskKind::listModels) {
+              displayCommand = QStringLiteral("[list finished models]");
             } else if (activeTask_ == TaskKind::serviceUnitRepair) {
               displayCommand =
                   QStringLiteral("[install/repair service unit link]");
@@ -652,7 +711,7 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   connect(&runner_, &RemoteCommandRunner::standardOutputReceived, this,
           [this](const QByteArray &data) {
             activeStandardOutput_.append(data);
-            if (activeTask_ != TaskKind::availabilityProbe) {
+            if (activeTask_ != TaskKind::availabilityProbe && activeTask_ != TaskKind::listModels) {
               appendClassifiedConsoleBytes(mainStandardOutputDisplayBuffer_,
                                            data);
             }
@@ -846,9 +905,10 @@ void MainWindow::runCommand(const QString &label, const QString &command,
     standardInput.append('\n');
   }
   const SshConnectionOptions options = connectionOptions();
-  if (kind == TaskKind::prepareModel || kind == TaskKind::serviceMutation ||
+  if (kind == TaskKind::prepareModel || kind == TaskKind::reexportModel || kind == TaskKind::serviceMutation ||
       kind == TaskKind::serviceUnitRepair) thresholds_.invalidate();
-  runner_.start(options, kind == TaskKind::prepareModel
+  if (kind == TaskKind::reexportModel) invalidateAvailability();
+  runner_.start(options, (kind == TaskKind::prepareModel || kind == TaskKind::reexportModel)
       ? thresholds::deploymentLock(command) : command, standardInput);
   if (options.acceptNewHostKey && runner_.isRunning()) {
     acceptNewHostKeyCheck_->setChecked(false);
@@ -1029,8 +1089,10 @@ void MainWindow::applyAvailabilityProbe(const QByteArray &output) {
   capabilities_.directRuntimeReady = present("__JCG_DIRECT_READY__");
   capabilities_.prepareScript = present("__JCG_PREPARE__");
   capabilities_.prepareInputs = present("__JCG_PREPARE_INPUTS__");
+  capabilities_.reexportInputs = present("__JCG_REEXPORT_INPUTS__");
   capabilities_.rebuildScript = present("__JCG_REBUILD__");
   capabilities_.directInferenceActive = present("__JCG_DIRECT_ACTIVE__");
+  applyFinishedModels(output);
 
   const auto value = [&output](const char *marker) {
     const QByteArray prefix = QByteArray(marker) + '=';
@@ -1165,6 +1227,34 @@ void MainWindow::applyAvailabilityProbe(const QByteArray &output) {
                 QColor(QStringLiteral("#4d9b58")));
 }
 
+void MainWindow::applyFinishedModels(const QByteArray &output) {
+  finishedModels_ = parseFinishedModels(output);
+  const QSignalBlocker blocker(finishedModelCombo_);
+  finishedModelCombo_->clear();
+  finishedModelCombo_->addItem(finishedModels_.isEmpty()
+      ? QStringLiteral("No finished models loaded — refresh")
+      : QStringLiteral("Select a finished model…"));
+  for (const auto &model : finishedModels_) {
+    finishedModelCombo_->addItem(QStringLiteral("%1 (%2) — %3")
+        .arg(model.name, model.variant, model.directory));
+  }
+  syncFinishedModelSelection();
+}
+
+void MainWindow::syncFinishedModelSelection() {
+  const auto options = diagnosticOptions();
+  int index = 0;
+  for (qsizetype i = 0; i < finishedModels_.size(); ++i) {
+    const auto &model = finishedModels_.at(i);
+    if (model.name == options.modelName && model.directory == options.modelDirectory &&
+        model.variant == options.variant) {
+      index = static_cast<int>(i + 1);
+      break;
+    }
+  }
+  finishedModelCombo_->setCurrentIndex(index);
+}
+
 void MainWindow::updateActionAvailability() {
   const bool mainBusy = runner_.isRunning();
   const bool controlBusy = controlRunner_.isRunning();
@@ -1204,6 +1294,8 @@ void MainWindow::updateActionAvailability() {
   serviceLogsButton_->setEnabled(!anyBusy && capabilities_.service);
 
   modelNameEdit_->setEnabled(!anyBusy);
+  finishedModelCombo_->setEnabled(!anyBusy);
+  refreshModelsButton_->setEnabled(!anyBusy);
   modelDirectoryEdit_->setEnabled(!anyBusy);
   variantCombo_->setEnabled(!anyBusy);
   preparationModeCombo_->setEnabled(!anyBusy);
@@ -1221,6 +1313,10 @@ void MainWindow::updateActionAvailability() {
       !anyBusy && parametersValid && capabilities_.prepareScript &&
       capabilities_.prepareInputs && !capabilities_.serviceActive &&
       !capabilities_.directInferenceActive);
+  reexportModelButton_->setEnabled(
+      !anyBusy && parametersValid && capabilities_.prepareScript &&
+      capabilities_.reexportInputs && capabilities_.runtime &&
+      !capabilities_.serviceActive && !capabilities_.directInferenceActive);
   validateRuntimeButton_->setEnabled(
       !anyBusy && parametersValid && capabilities_.runtime &&
       capabilities_.config && capabilities_.manifest && capabilities_.engine &&
@@ -1271,9 +1367,6 @@ void MainWindow::finishMainCommand(int exitCode,
                                    QProcess::ExitStatus exitStatus,
                                    bool cancelled) {
   const TaskKind completedTask = activeTask_;
-  const bool repairSucceeded =
-      completedTask == TaskKind::serviceUnitRepair && !cancelled &&
-      exitStatus == QProcess::NormalExit && exitCode == 0;
   if (completedTask != TaskKind::availabilityProbe) {
     flushClassifiedConsoleBytes(mainStandardOutputDisplayBuffer_);
   }
@@ -1283,6 +1376,11 @@ void MainWindow::finishMainCommand(int exitCode,
   if (completedTask == TaskKind::availabilityProbe &&
       exitStatus == QProcess::NormalExit && exitCode == 0) {
     applyAvailabilityProbe(activeStandardOutput_);
+  } else if (completedTask == TaskKind::listModels && !cancelled &&
+             exitStatus == QProcess::NormalExit && exitCode == 0) {
+    applyFinishedModels(activeStandardOutput_);
+    appendConsole(QStringLiteral("Loaded %1 saved model variants from finished_models.\n")
+                      .arg(finishedModels_.size()), informationalColor());
   } else if (completedTask == TaskKind::availabilityProbe) {
     serviceAvailabilityLabel_->setText(QStringLiteral(
         "Availability check failed. Service actions are disabled; retry from "
@@ -1329,7 +1427,4 @@ void MainWindow::finishMainCommand(int exitCode,
   }
   activeTask_ = TaskKind::none;
   updateActionAvailability();
-  if (repairSucceeded && !unknownHostKey) {
-    checkAvailability();
-  }
 }

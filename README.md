@@ -4,12 +4,14 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Developed at the German Cancer Research Center (DKFZ).
 -->
 
+# CMR Cardiac Trigger User Interface deployed on an NVIDIA Jetson Orin Nano
+
 [![Source Code](https://raw.githubusercontent.com/selimct/DKFZ-MRI-Cardiac-Trigger-GUI/refs/heads/main/packaging/source-badge.svg)](https://github.com/selimct/Cetin-Cardiac-Trigger-SourceCode.git)
 [![Data](https://raw.githubusercontent.com/selimct/DKFZ-MRI-Cardiac-Trigger-GUI/refs/heads/main/packaging/data-badge.svg)](https://github.com/selimct/Cetin-UHF-ECGPOX-Data.git)
 [![ParquetPlot](https://raw.githubusercontent.com/selimct/ParquetPlot/refs/heads/main/resources/parquetplot-gitlab-badge.svg)](https://github.com/selimct/ParquetPlot)
 [![ParquetViewer](https://raw.githubusercontent.com/selimct/ParquetViewer/refs/heads/main/packaging/parquetviewer-gitlab-badge.svg)](https://github.com/selimct/ParquetViewer)
 
-# Jetson Control GUI
+## Jetson Control GUI
 
 A local Qt 6 desktop application for running commands on the Jetson over SSH
 and viewing stdout, stderr, exit status, and service logs. Nothing from this
@@ -74,8 +76,8 @@ signal is present.
 Install / repair unit link follows the live-stack deployment contract: while
 the service is stopped, it links the selected checkout's
 `deploy/dkfz-native-uart-live.service` into `/etc/systemd/system`, reloads
-systemd, verifies the resolved link, and automatically repeats the availability
-check. It deliberately does not enable or start the service. It also does not
+systemd, and verifies the resolved link. Select **Check** afterward to refresh
+availability. It deliberately does not enable or start the service. It also does not
 create the service account, groups, or state directory, or install the
 namespaced journald policy; those remain one-time host provisioning steps.
 
@@ -94,6 +96,9 @@ Operates the current checkout beneath the selected remote project root. It can:
   PTH-to-ONNX-to-TensorRT pipeline;
 - select an exact source directory such as `finished_models/target_r` or
   `models_noCV/target_r` and pass it through `--model-dir`;
+- select a model and best/tuned variant from the remote `finished_models`
+  dropdown, populated by **Refresh models** or **Check** using the saved
+  training configuration and weights;
 - atomically activate the resulting engine and manifest as
   `deploy/model/model.engine` and `deploy/model/model.conf`;
 - validate the configuration and deserialize/check the TensorRT engine;
@@ -104,6 +109,15 @@ Operates the current checkout beneath the selected remote project root. It can:
 - optionally capture raw UART bytes beneath the project root.
 
 Both the service and direct runtime consume the stable `deploy/model` slot.
+**Re-export weights + activate** runs the full saved-PTH-to-ONNX-to-TensorRT
+pipeline in one action, including parity checks and activation. It works
+without an existing ONNX file regardless of the preparation mode selection.
+After success, select **Check** to refresh availability and validate readiness
+before starting the model again. Stop the service and direct inference
+first; the native runtime and full Jetson Python environment must be installed.
+Selecting an entry in the dropdown fills the declared model name, exact source
+directory, and variant locally. Select **Check** to query the Jetson for that selection.
+
 The GUI reads its model name, variant, and source directory and prevents direct
 Start when they do not match the current selection. Model preparation is
 disabled while the service is active, activating, reloading, or deactivating,
@@ -134,6 +148,13 @@ input changes the GUI status to paused while leaving the managed process and
 Stop action active. `input_paused` is shown in amber. Once stable moving input
 returns, the status changes back to running; the runtime has cleared its old
 temporal state and rebuilds a completely fresh model window before inference.
+
+The GUI does not poll the Jetson in the background. Editing fields or selecting
+a model sends no requests; Check and Refresh buttons explicitly retrieve status.
+Threshold actions save only when clicked; use **Refresh deployed thresholds**
+afterward to confirm application. Pending confirmation does not block Refresh
+or the rest of the GUI. Explicitly started inference and log streams remain
+attached until stopped.
 
 Availability checks are always manual. After changing the connection or remote
 project root, select **Check** in the Connection dialog. After changing the

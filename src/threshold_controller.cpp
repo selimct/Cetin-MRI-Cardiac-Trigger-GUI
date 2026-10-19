@@ -15,6 +15,7 @@
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QStandardPaths>
+#include <QTimer>
 #include <QUuid>
 #include <algorithm>
 #include <stdexcept>
@@ -53,10 +54,6 @@ namespace
 
 ThresholdController::ThresholdController(QObject *parent) : QObject(parent), runner_(this)
 {
-    poll_.setInterval(3000);
-    connect(&poll_, &QTimer::timeout, this, [this]
-            {
-    if (!externalBusy_ && phase_ == Phase::idle && !runner_.isRunning() && !connection_.host.isEmpty()) readProperties(); });
     connect(&runner_, &RemoteCommandRunner::standardOutputReceived, this,
             [this](const QByteArray &data)
             { output_ += data; });
@@ -90,7 +87,6 @@ void ThresholdController::invalidate()
     cursor_.clear();
     invocation_.clear();
     disabledAtStartup_ = false;
-    poll_.stop();
     if (runner_.isRunning())
         runner_.cancel();
     phase_ = Phase::idle;
@@ -111,7 +107,6 @@ void ThresholdController::refresh()
 {
     if (phase_ != Phase::idle || runner_.isRunning() || externalBusy_)
         return;
-    poll_.start();
     readProperties();
 }
 void ThresholdController::start(Phase phase, const QString &script, bool locked)
@@ -227,14 +222,16 @@ void ThresholdController::finished(bool success, const QString &message)
                 status_ = result;
                 saveWarning_ = "Audit failed after the file operation: " + QString::fromUtf8(e.what());
                 valid_ = false;
-                readProperties();
+                emit changed();
                 return;
             }
             status_ = result;
             if (!success)
                 pending_ = false;
-            valid_ = false; // Refresh actual on-disk state even after a partial failure.
-            readProperties();
+            // Readback is explicitly requested with Refresh, including after
+            // partial failures. A pending confirmation must not lock that button.
+            valid_ = false;
+            emit changed();
             return;
         }
         if (!success)

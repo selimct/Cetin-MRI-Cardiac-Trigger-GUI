@@ -73,6 +73,12 @@ if(BUILD_TESTING)
     add_test(NAME threshold-controller COMMAND test-threshold-controller)
     set_tests_properties(threshold-controller PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+    add_executable(test-model-deployment tests/test_model_deployment.cpp
+        src/main_window.cpp src/main_window.h src/threshold_panel.cpp src/threshold_panel.h)
+    target_link_libraries(test-model-deployment PRIVATE jetson_control_core Qt6::Test Qt6::Widgets)
+    add_test(NAME model-deployment COMMAND test-model-deployment)
+    set_tests_properties(model-deployment PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
     add_executable(test-ssh-command-builder
         tests/test_ssh_command_builder.cpp
     )

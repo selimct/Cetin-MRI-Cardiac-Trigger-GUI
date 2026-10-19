@@ -38,11 +38,13 @@ private:
     none,
     ordinary,
     availabilityProbe,
+    listModels,
     serviceMutation,
     serviceUnitRepair,
     serviceLogs,
     validateRuntime,
     prepareModel,
+    reexportModel,
     rebuildRuntime,
     directInference,
   };
@@ -66,6 +68,7 @@ private:
     bool directRuntimeReady{false};
     bool prepareScript{false};
     bool prepareInputs{false};
+    bool reexportInputs{false};
     bool rebuildScript{false};
     bool directInferenceActive{false};
     QString activeModel;
@@ -91,6 +94,8 @@ private:
   void checkAvailability();
   void invalidateAvailability();
   void applyAvailabilityProbe(const QByteArray &output);
+  void applyFinishedModels(const QByteArray &output);
+  void syncFinishedModelSelection();
   void updateActionAvailability();
   void updateDiagnosticModeControls();
   void finishMainCommand(int exitCode, QProcess::ExitStatus exitStatus,
@@ -133,6 +138,9 @@ private:
   QPushButton *serviceLogsButton_{nullptr};
 
   QLabel *diagnosticAvailabilityLabel_{nullptr};
+  QComboBox *finishedModelCombo_{nullptr};
+  QPushButton *refreshModelsButton_{nullptr};
+  QList<FinishedModel> finishedModels_;
   QLineEdit *modelNameEdit_{nullptr};
   QLineEdit *modelDirectoryEdit_{nullptr};
   QComboBox *variantCombo_{nullptr};
@@ -145,6 +153,7 @@ private:
   QCheckBox *gpioSafetyCheck_{nullptr};
   QPushButton *diagnosticCheckButton_{nullptr};
   QPushButton *prepareModelButton_{nullptr};
+  QPushButton *reexportModelButton_{nullptr};
   QPushButton *validateRuntimeButton_{nullptr};
   QPushButton *startInferenceButton_{nullptr};
   QPushButton *stopInferenceButton_{nullptr};
