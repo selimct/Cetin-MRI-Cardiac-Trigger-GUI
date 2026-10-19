@@ -157,7 +157,18 @@ jobs:
         shell: pwsh
         run: |
           cmake --install build --config Release --prefix "$env:GITHUB_WORKSPACE\package"
+          if ($LASTEXITCODE -ne 0) { throw "CMake installation failed" }
           windeployqt --release --compiler-runtime --no-translations "$env:GITHUB_WORKSPACE\package\bin\jetson-control.exe"
+          if ($LASTEXITCODE -ne 0) { throw "Qt runtime deployment failed" }
+
+          # MSVC release builds need the redistributable installed on the target.
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $visualStudio = & $vswhere -latest -version '[17.0,18.0)' -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not $visualStudio) {
+            throw "Visual Studio 2022 installation was not found"
+          }
+          $redist = Join-Path $visualStudio 'VC\Redist\MSVC\v143\vc_redist.x64.exe'
+          Copy-Item -LiteralPath $redist -Destination "$env:GITHUB_WORKSPACE\package\vc_redist.x64.exe" -ErrorAction Stop
 
       - name: Build Windows installer
         shell: pwsh
@@ -186,6 +197,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "Inno Setup failed with exit code $LASTEXITCODE"
           }
+
+      - name: Test Windows installation, shortcuts, launch, and uninstall
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem -Path dist -Filter '*-windows-x86_64-setup.exe')
+          if ($installers.Count -ne 1) { throw "Expected exactly one Windows installer" }
+          ./packaging/windows/test-install.ps1 -InstallerPath $installers[0].FullName
 
       - name: Upload Windows package
         uses: actions/upload-artifact@v7

@@ -205,11 +205,21 @@ gpg --import jetson-control-release-signing-key.asc
 gpg --verify jetson-control-*-linux-x86_64.AppImage.asc jetson-control-*-linux-x86_64.AppImage
 ```
 
-On Windows, run the downloaded setup executable and launch **Jetson Control**
-from the Start menu. The application still requires an OpenSSH `ssh` client on
-the desktop because all Jetson commands are executed through it. The Windows
-application and installer are currently unsigned, so Windows SmartScreen may
-show an unrecognized-app warning.
+On Windows, run the downloaded setup executable and approve the administrator
+prompt to install **Jetson Control** for all users in Program Files. Launch it
+from the Start menu or Windows Search; the installer also offers a desktop
+shortcut. Remove it through **Settings > Apps > Installed apps > Jetson Control
+> Uninstall**. Run a newer setup executable to update the system-wide
+installation. If you used an older per-user installer, uninstall that copy
+first to avoid having two installations.
+
+The installer includes Qt and installs the required Visual C++ runtime when
+needed. The application still requires an OpenSSH `ssh` client on the desktop
+because all Jetson commands are executed through it. The Windows application
+and installer are currently unsigned, so Windows SmartScreen may show an
+unrecognized-app warning. The release workflow checks system-wide installation,
+shortcuts, launching the installed application, and uninstallation before
+uploading the Windows package.
 
 To publish a new version, first make sure the release workflow is present on
 the default branch. In GitHub, create a release for a tag such as `v0.1.0` and
