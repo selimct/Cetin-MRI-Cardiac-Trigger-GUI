@@ -85,6 +85,10 @@ Reload Unit runs `systemctl daemon-reload`. It is needed after editing the unit
 file, but runtime, config, manifest, and engine changes need only a service
 restart. The GUI cannot prove electrical safety.
 
+The first tab, **Installed service**, also contains the **Finished models**
+selector, **Refresh models**, and **Re-export weights + activate** button.
+Model selection stays local until you select **Check availability**.
+
 ### Diagnostic / direct
 
 Operates the current checkout beneath the selected remote project root. It can:
@@ -96,9 +100,6 @@ Operates the current checkout beneath the selected remote project root. It can:
   PTH-to-ONNX-to-TensorRT pipeline;
 - select an exact source directory such as `finished_models/target_r` or
   `models_noCV/target_r` and pass it through `--model-dir`;
-- select a model and best/tuned variant from the remote `finished_models`
-  dropdown, populated by **Refresh models** or **Check** using the saved
-  training configuration and weights;
 - atomically activate the resulting engine and manifest as
   `deploy/model/model.engine` and `deploy/model/model.conf`;
 - validate the configuration and deserialize/check the TensorRT engine;

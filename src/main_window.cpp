@@ -216,6 +216,34 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   serviceActions->addWidget(serviceRestartButton_);
   serviceActions->addWidget(serviceLogsButton_);
   serviceLayout->addWidget(serviceAvailabilityLabel_);
+
+  auto *modelDeploymentGroup = new QGroupBox(QStringLiteral("Model deployment"), servicePage);
+  auto *finishedModelForm = new QFormLayout(modelDeploymentGroup);
+  finishedModelForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+  finishedModelCombo_ = new QComboBox(modelDeploymentGroup);
+  finishedModelCombo_->setObjectName(QStringLiteral("finishedModelSelection"));
+  finishedModelCombo_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+  finishedModelCombo_->setMinimumContentsLength(22);
+  finishedModelCombo_->addItem(QStringLiteral("Select a finished model…"));
+  finishedModelCombo_->setToolTip(QStringLiteral(
+      "Models with saved weights and training configuration in the Jetson's "
+      "finished_models directory. Select Refresh models or Check to load."));
+  refreshModelsButton_ = new QPushButton(QStringLiteral("Refresh models"), modelDeploymentGroup);
+  refreshModelsButton_->setObjectName(QStringLiteral("refreshFinishedModels"));
+  auto *modelSelectionRow = new QHBoxLayout;
+  modelSelectionRow->addWidget(finishedModelCombo_, 1);
+  modelSelectionRow->addWidget(refreshModelsButton_);
+  reexportModelButton_ = makeActionButton(
+      QStringLiteral("Re-export weights + activate"), modelDeploymentGroup);
+  reexportModelButton_->setObjectName(QStringLiteral("reexportModel"));
+  reexportModelButton_->setToolTip(QStringLiteral(
+      "Export the selected saved PTH weights to ONNX, run parity checks, build "
+      "TensorRT, and activate deploy/model. Select Check afterward to refresh readiness. "
+      "Requires the full Jetson Python environment and a built runtime. Stop "
+      "the service and direct inference first."));
+  finishedModelForm->addRow(QStringLiteral("Finished models"), modelSelectionRow);
+  finishedModelForm->addRow(reexportModelButton_);
+  serviceLayout->addWidget(modelDeploymentGroup);
   serviceLayout->addWidget(serviceSafetyCheck_);
   serviceLayout->addLayout(serviceMaintenanceActions);
   serviceLayout->addLayout(serviceActions);
@@ -242,19 +270,6 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   auto *runtimeForm = new QFormLayout;
   deploymentForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
   runtimeForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
-  finishedModelCombo_ = new QComboBox(diagnosticPage);
-  finishedModelCombo_->setObjectName(QStringLiteral("finishedModelSelection"));
-  finishedModelCombo_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
-  finishedModelCombo_->setMinimumContentsLength(22);
-  finishedModelCombo_->addItem(QStringLiteral("Select a finished model…"));
-  finishedModelCombo_->setToolTip(QStringLiteral(
-      "Models with saved weights and training configuration in the Jetson's "
-      "finished_models directory. Select Refresh models or Check to load."));
-  refreshModelsButton_ = new QPushButton(QStringLiteral("Refresh models"), diagnosticPage);
-  refreshModelsButton_->setObjectName(QStringLiteral("refreshFinishedModels"));
-  auto *modelSelectionRow = new QHBoxLayout;
-  modelSelectionRow->addWidget(finishedModelCombo_, 1);
-  modelSelectionRow->addWidget(refreshModelsButton_);
   modelNameEdit_ = new QLineEdit(QStringLiteral("target_r"), diagnosticPage);
   modelNameEdit_->setObjectName(QStringLiteral("modelName"));
   modelNameEdit_->setToolTip(QStringLiteral(
@@ -308,7 +323,6 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
                     diagnosticPage);
   gpioSafetyCheck_->setEnabled(false);
 
-  deploymentForm->addRow(QStringLiteral("Finished models"), modelSelectionRow);
   deploymentForm->addRow(QStringLiteral("Model name"), modelNameEdit_);
   deploymentForm->addRow(QStringLiteral("Model source directory"),
                          modelDirectoryEdit_);
@@ -337,15 +351,6 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
       "Runs prepare_model.sh with the exact source directory and replaces "
       "deploy/model only after validation. The systemd service must be "
       "stopped."));
-  reexportModelButton_ = makeActionButton(
-      QStringLiteral("Re-export weights + activate"), diagnosticPage);
-  reexportModelButton_->setObjectName(QStringLiteral("reexportModel"));
-  reexportModelButton_->setToolTip(QStringLiteral(
-      "Export the selected saved PTH weights to ONNX, run parity checks, build "
-      "TensorRT, and activate deploy/model. Select Check afterward to refresh readiness. "
-      "Requires the full Jetson Python environment and a built runtime. Stop "
-      "the service and direct inference first."));
-  deploymentForm->addRow(reexportModelButton_);
   validateRuntimeButton_ = makeActionButton(
       QStringLiteral("Validate config + engine"), diagnosticPage);
   startInferenceButton_ = makeActionButton(
