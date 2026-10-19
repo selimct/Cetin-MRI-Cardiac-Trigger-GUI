@@ -26,6 +26,10 @@ add_library(jetson_control_core STATIC
     src/remote_command_runner.h
     src/ssh_command_builder.cpp
     src/ssh_command_builder.h
+    src/threshold_state.cpp
+    src/threshold_state.h
+    src/threshold_controller.cpp
+    src/threshold_controller.h
 )
 target_link_libraries(jetson_control_core PUBLIC Qt6::Core)
 target_include_directories(jetson_control_core PUBLIC src)
@@ -34,6 +38,8 @@ qt_add_executable(jetson-control WIN32
     src/main.cpp
     src/main_window.cpp
     src/main_window.h
+    src/threshold_panel.cpp
+    src/threshold_panel.h
 )
 if(WIN32)
     target_sources(jetson-control PRIVATE
@@ -56,6 +62,16 @@ endif()
 include(CTest)
 if(BUILD_TESTING)
     find_package(Qt6 6.5 REQUIRED COMPONENTS Test)
+
+    add_executable(test-threshold-state tests/test_threshold_state.cpp)
+    target_link_libraries(test-threshold-state PRIVATE jetson_control_core Qt6::Test)
+    add_test(NAME threshold-state COMMAND test-threshold-state)
+
+    add_executable(test-threshold-controller tests/test_threshold_controller.cpp
+        src/threshold_panel.cpp src/threshold_panel.h)
+    target_link_libraries(test-threshold-controller PRIVATE jetson_control_core Qt6::Test Qt6::Widgets)
+    add_test(NAME threshold-controller COMMAND test-threshold-controller)
+    set_tests_properties(threshold-controller PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
     add_executable(test-ssh-command-builder
         tests/test_ssh_command_builder.cpp

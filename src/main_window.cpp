@@ -5,6 +5,7 @@
 #include "main_window.h"
 
 #include "console_output_classifier.h"
+#include "threshold_panel.h"
 
 #include <QCheckBox>
 #include <QCloseEvent>
@@ -219,6 +220,8 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   serviceLayout->addLayout(serviceActions);
   serviceLayout->addStretch();
   operationsTabs_->addTab(servicePage, QStringLiteral("Installed service"));
+  auto *thresholdPanel = new ThresholdPanel(&thresholds_, operationsTabs_);
+  operationsTabs_->addTab(thresholdPanel, QStringLiteral("Live thresholds"));
 
   auto *diagnosticPage = new QWidget(operationsTabs_);
   auto *diagnosticLayout = new QVBoxLayout(diagnosticPage);
@@ -728,10 +731,26 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
         updateActionAvailability();
       });
 
+  thresholds_.configure(connectionOptions(), sudoPasswordEdit_->text());
+  connect(&thresholds_, &ThresholdController::changed, this, &MainWindow::updateActionAvailability);
+  const auto configureThresholds = [this] {
+    thresholds_.configure(connectionOptions(), sudoPasswordEdit_->text());
+  };
+  connect(hostEdit_, &QLineEdit::textChanged, this, configureThresholds);
+  connect(userEdit_, &QLineEdit::textChanged, this, configureThresholds);
+  connect(portSpin_, qOverload<int>(&QSpinBox::valueChanged), this, configureThresholds);
+  connect(identityFileEdit_, &QLineEdit::textChanged, this, configureThresholds);
+  connect(remoteDirectoryEdit_, &QLineEdit::textChanged, this, configureThresholds);
+  connect(sudoPasswordEdit_, &QLineEdit::textChanged, this, configureThresholds);
   updateDiagnosticModeControls();
 }
 
 void MainWindow::closeEvent(QCloseEvent *event) {
+  if (thresholds_.blocking()) {
+    statusLabel_->setText(QStringLiteral("Wait for the threshold operation to finish before closing."));
+    event->ignore();
+    return;
+  }
   if (!runner_.isRunning() && !controlRunner_.isRunning()) {
     sudoPasswordEdit_->clear();
     event->accept();
@@ -807,6 +826,10 @@ QString MainWindow::remoteSudoCommand(const QString &command) const {
 
 void MainWindow::runCommand(const QString &label, const QString &command,
                             TaskKind kind) {
+  if (thresholds_.blocking()) {
+    statusLabel_->setText(QStringLiteral("Wait for the threshold operation to finish."));
+    return;
+  }
   if (runner_.isRunning()) {
     statusLabel_->setText(
         QStringLiteral("Stop or cancel the active command first."));
@@ -823,7 +846,10 @@ void MainWindow::runCommand(const QString &label, const QString &command,
     standardInput.append('\n');
   }
   const SshConnectionOptions options = connectionOptions();
-  runner_.start(options, command, standardInput);
+  if (kind == TaskKind::prepareModel || kind == TaskKind::serviceMutation ||
+      kind == TaskKind::serviceUnitRepair) thresholds_.invalidate();
+  runner_.start(options, kind == TaskKind::prepareModel
+      ? thresholds::deploymentLock(command) : command, standardInput);
   if (options.acceptNewHostKey && runner_.isRunning()) {
     acceptNewHostKeyCheck_->setChecked(false);
   }
@@ -1142,7 +1168,8 @@ void MainWindow::applyAvailabilityProbe(const QByteArray &output) {
 void MainWindow::updateActionAvailability() {
   const bool mainBusy = runner_.isRunning();
   const bool controlBusy = controlRunner_.isRunning();
-  const bool anyBusy = mainBusy || controlBusy;
+  const bool anyBusy = mainBusy || controlBusy || thresholds_.blocking();
+  thresholds_.setExternalBusy((mainBusy && activeTask_ != TaskKind::serviceLogs) || controlBusy);
   const QString optionError = validateDiagnosticOptions(diagnosticOptions());
   const bool parametersValid = optionError.isEmpty();
   const bool gpioMode =

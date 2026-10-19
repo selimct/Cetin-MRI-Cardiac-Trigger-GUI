@@ -6,6 +6,7 @@
 
 #include "diagnostic_command_builder.h"
 #include "remote_command_runner.h"
+#include "threshold_controller.h"
 
 #include <QElapsedTimer>
 #include <QMainWindow>
@@ -97,6 +98,7 @@ private:
 
   RemoteCommandRunner runner_;
   RemoteCommandRunner controlRunner_;
+  ThresholdController thresholds_;
   QElapsedTimer commandTimer_;
   QElapsedTimer controlTimer_;
   TaskKind activeTask_{TaskKind::none};
