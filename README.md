@@ -359,7 +359,7 @@ through systemd once its deployment has been reviewed and configured.
 
 ## Notice
 
-This Software includes contributions by OpenAI's Codex.
+This Software includes contributions by OpenAI's Codex, and images created using AcademicCloud's image creation tool.
 
 ## Disclaimer
 
