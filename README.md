@@ -259,11 +259,11 @@ Then edit `connection.ini`:
 
 ```ini
 [ssh]
-host=192.168.1.50
+host=256.256.256.256
 user=orin
 port=22
 identity_file=jetson_ed25519
-remote_directory=/home/orin/work/live_stack
+remote_directory=/path/to/software_stack
 ```
 
 The path in `remote_directory` is evaluated on the Jetson. It does not need to
@@ -301,7 +301,7 @@ Host dkfz-jump
     IdentitiesOnly yes
 
 Host jetson-via-jump
-    HostName 10.0.0.25
+    HostName 256.0.0.256
     User orin
     ProxyJump dkfz-jump
 ```
