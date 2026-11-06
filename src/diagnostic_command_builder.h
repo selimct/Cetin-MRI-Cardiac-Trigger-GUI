@@ -12,6 +12,7 @@ struct FinishedModel {
   QString name;
   QString directory;
   QString variant;
+  bool recoverySupported{false};
 };
 
 [[nodiscard]] QString finishedModelsCommand();
@@ -27,6 +28,7 @@ struct DiagnosticRuntimeOptions {
   QString sessionLogPath;
   QString rawCapturePath;
   bool emitProbabilities{false};
+  bool forceRecoveryOff{false};
 };
 
 [[nodiscard]] QString
@@ -35,6 +37,7 @@ validateDiagnosticOptions(const DiagnosticRuntimeOptions &options);
 [[nodiscard]] QString serviceUnitRepairCommand(bool sudoPasswordProvided);
 [[nodiscard]] QString
 prepareModelCommand(const DiagnosticRuntimeOptions &options);
+[[nodiscard]] QString prepareStoppedModelCommand(const DiagnosticRuntimeOptions &options);
 [[nodiscard]] QString
 reexportModelCommand(const DiagnosticRuntimeOptions &options);
 [[nodiscard]] QString
@@ -45,3 +48,7 @@ startDirectRuntimeCommand(const DiagnosticRuntimeOptions &options);
 [[nodiscard]] QString
 availabilityProbeCommand(const DiagnosticRuntimeOptions &options);
 [[nodiscard]] QString rebuildRuntimeCommand();
+
+[[nodiscard]] QString deploymentStopCommand(bool sudoPasswordProvided);
+[[nodiscard]] QString deploymentStartCommand(bool sudoPasswordProvided,
+    const QString &manifestRevision, const QString &configRevision, const QString &runtimeRevision);

@@ -30,6 +30,10 @@ add_library(jetson_control_core STATIC
     src/threshold_state.h
     src/threshold_controller.cpp
     src/threshold_controller.h
+    src/recovery_state.cpp
+    src/recovery_state.h
+    src/recovery_controller.cpp
+    src/recovery_controller.h
 )
 target_link_libraries(jetson_control_core PUBLIC Qt6::Core)
 target_include_directories(jetson_control_core PUBLIC src)
@@ -40,6 +44,8 @@ qt_add_executable(jetson-control WIN32
     src/main_window.h
     src/threshold_panel.cpp
     src/threshold_panel.h
+    src/recovery_panel.cpp
+    src/recovery_panel.h
 )
 if(WIN32)
     target_sources(jetson-control PRIVATE
@@ -63,6 +69,15 @@ include(CTest)
 if(BUILD_TESTING)
     find_package(Qt6 6.5 REQUIRED COMPONENTS Test)
 
+    add_executable(test-remote-command-runner tests/test_remote_command_runner.cpp)
+    target_link_libraries(test-remote-command-runner PRIVATE jetson_control_core Qt6::Test)
+    add_test(NAME remote-command-runner COMMAND test-remote-command-runner)
+
+    add_executable(test-recovery tests/test_recovery.cpp src/recovery_panel.cpp src/recovery_panel.h)
+    target_link_libraries(test-recovery PRIVATE jetson_control_core Qt6::Test Qt6::Widgets)
+    add_test(NAME recovery COMMAND test-recovery)
+    set_tests_properties(recovery PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
     add_executable(test-threshold-state tests/test_threshold_state.cpp)
     target_link_libraries(test-threshold-state PRIVATE jetson_control_core Qt6::Test)
     add_test(NAME threshold-state COMMAND test-threshold-state)
@@ -73,8 +88,14 @@ if(BUILD_TESTING)
     add_test(NAME threshold-controller COMMAND test-threshold-controller)
     set_tests_properties(threshold-controller PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+    add_executable(test-deployment-workflow tests/test_deployment_workflow.cpp
+        src/main_window.cpp src/main_window.h src/threshold_panel.cpp src/threshold_panel.h src/recovery_panel.cpp src/recovery_panel.h)
+    target_link_libraries(test-deployment-workflow PRIVATE jetson_control_core Qt6::Test Qt6::Widgets)
+    add_test(NAME deployment-workflow COMMAND test-deployment-workflow)
+    set_tests_properties(deployment-workflow PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
     add_executable(test-model-deployment tests/test_model_deployment.cpp
-        src/main_window.cpp src/main_window.h src/threshold_panel.cpp src/threshold_panel.h)
+        src/main_window.cpp src/main_window.h src/threshold_panel.cpp src/threshold_panel.h src/recovery_panel.cpp src/recovery_panel.h)
     target_link_libraries(test-model-deployment PRIVATE jetson_control_core Qt6::Test Qt6::Widgets)
     add_test(NAME model-deployment COMMAND test-model-deployment)
     set_tests_properties(model-deployment PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

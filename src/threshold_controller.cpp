@@ -465,6 +465,7 @@ void ThresholdController::request(const QString &action, const QString &number, 
                                                      properties_.value("Group").isEmpty() ? (properties_.value("User").isEmpty() ? "root" : properties_.value("User")) : properties_.value("Group"));
         pending_ = true;
         status_ = "Saving…";
+        emit policyChangeRequested(manifest_.identity());
         start(Phase::write, script, true);
     }
     catch (const std::exception &e)

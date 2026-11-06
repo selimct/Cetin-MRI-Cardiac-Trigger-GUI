@@ -206,38 +206,54 @@ QString prepareModelCommand(const DiagnosticRuntimeOptions &options) {
   if (options.preparationMode == QStringLiteral("jetson-only")) {
     command += QStringLiteral(" --jetson-only");
   }
+  if (options.forceRecoveryOff) command += QStringLiteral(" --no-recovery");
   return command;
 }
 
 QString finishedModelsCommand() {
-  // Read the declared model name, which need not match its directory name.
-  // Encode the catalog so paths and JSON cannot collide with probe markers.
-  const QString script = QString::fromUtf8(R"PY(
-import base64, json, pathlib, re, sys
-models = []
-root = pathlib.Path('finished_models')
-for directory in sorted(root.iterdir()) if root.is_dir() else []:
-    if not directory.is_dir():
-        continue
-    for variant, config, weights in [('best', 'train_config.json', 'best.pth'),
-                                     ('tuned', 'tuning/tuned_config.json', 'best_tuned.pth')]:
-        if not (directory / config).is_file() or not (directory / weights).is_file():
-            continue
-        try:
-            name = json.loads((directory / config).read_text(encoding='utf-8')).get('modelname', '')
-            if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9._-]+', name):
-                raise ValueError('invalid modelname')
-            models.append(dict(name=name, directory=directory.as_posix(), variant=variant))
-        except (OSError, ValueError, AttributeError) as error:
-            print(f'Skipping {directory / config}: {error}', file=sys.stderr)
-print('__JCG_FINISHED_MODELS__=' + base64.b64encode(json.dumps(models).encode()).decode())
-)PY");
-  return QStringLiteral("python3 -c %1").arg(posixShellQuote(script));
+  // Discover published artifacts remotely with POSIX tools; parse source JSON
+  // locally in Qt. Runtime-only deployments do not require Python.
+  return QString::fromUtf8(R"SH(
+catalog_root=$(pwd -P)
+for directory in finished_models/*; do
+  test -d "$directory" || continue
+  resolved_directory=$(readlink -f -- "$directory") || continue
+  case "$resolved_directory" in "$catalog_root"/*) ;; *) continue;; esac
+  for variant in best tuned; do
+    if test "$variant" = best; then config="$directory/train_config.json"; weights="$directory/best.pth"
+    else config="$directory/tuning/tuned_config.json"; weights="$directory/best_tuned.pth"; fi
+    test -f "$config" && test -f "$weights" || continue
+    resolved_config=$(readlink -f -- "$config") || continue
+    resolved_weights=$(readlink -f -- "$weights") || continue
+    case "$resolved_config" in "$catalog_root"/*) ;; *) continue;; esac
+    case "$resolved_weights" in "$catalog_root"/*) ;; *) continue;; esac
+    test "$(stat -Lc %s -- "$config")" -le 2097152 || continue
+    printf '__JCG_FINISHED_MODEL__='
+    printf '%s' "$directory" | base64 -w0
+    printf ':%s:' "$variant"
+    base64 -w0 -- "$config"
+    printf '\n'
+  done
+done
+)SH");
 }
 
 QList<FinishedModel> parseFinishedModels(const QByteArray &output) {
   QList<FinishedModel> result;
   for (const auto &line : output.split('\n')) {
+    const QByteArray itemPrefix = "__JCG_FINISHED_MODEL__=";
+    if (line.startsWith(itemPrefix)) {
+      const auto parts = line.mid(itemPrefix.size()).split(':');
+      if (parts.size() != 3) continue;
+      const auto config = QJsonDocument::fromJson(QByteArray::fromBase64(parts[2])).object();
+      FinishedModel model{config.value("modelname").toString(),
+                          QString::fromUtf8(QByteArray::fromBase64(parts[0])),
+                          QString::fromLatin1(parts[1]), config.value("recovery_head").toBool(false)};
+      DiagnosticRuntimeOptions options;
+      options.modelName = model.name; options.modelDirectory = model.directory; options.variant = model.variant;
+      if (model.directory.startsWith("finished_models/") && validateDiagnosticOptions(options).isEmpty()) result.append(model);
+      continue;
+    }
     const QByteArray prefix = "__JCG_FINISHED_MODELS__=";
     if (!line.startsWith(prefix)) continue;
     const auto entries = QJsonDocument::fromJson(
@@ -258,18 +274,22 @@ QList<FinishedModel> parseFinishedModels(const QByteArray &output) {
   return result;
 }
 
+QString prepareStoppedModelCommand(const DiagnosticRuntimeOptions &options) {
+  return QStringLiteral(
+      "service_state=\"$(systemctl is-active %1.service 2>/dev/null || true)\"; "
+      "case \"$service_state\" in inactive|failed) ;; active|activating|reloading|deactivating) "
+      "printf 'Stop the service before preparing a model.\\n' >&2; exit 3;; *) "
+      "test \"$(systemctl show --value -p LoadState %1.service 2>/dev/null || true)\" = not-found || "
+      "{ printf 'Cannot verify that the service is stopped. Check again.\\n' >&2; exit 3; };; esac; "
+      "%2; if test -s \"$pid_file\" && kill -0 \"$(cat -- \"$pid_file\")\" 2>/dev/null; then "
+      "printf 'Stop direct inference before preparing a model.\\n' >&2; exit 3; fi; %3")
+      .arg(QString::fromLatin1(kServiceName), stateVariables(), prepareModelCommand(options));
+}
+
 QString reexportModelCommand(const DiagnosticRuntimeOptions &options) {
   auto complete = options;
   complete.preparationMode = QStringLiteral("complete");
-  return QStringLiteral(
-             "service_state=\"$(systemctl is-active %1.service 2>/dev/null || true)\"; "
-             "case \"$service_state\" in active|activating|reloading|deactivating) "
-             "printf 'Stop the service before re-exporting a model.\\n' >&2; exit 3;; esac; "
-             "%2; if test -s \"$pid_file\" && "
-             "kill -0 \"$(cat -- \"$pid_file\")\" 2>/dev/null; then "
-             "printf 'Stop direct inference before re-exporting a model.\\n' >&2; exit 3; fi; "
-             "%3")
-      .arg(QString::fromLatin1(kServiceName), stateVariables(), prepareModelCommand(complete));
+  return prepareStoppedModelCommand(complete);
 }
 
 QString validateRuntimeCommand(const DiagnosticRuntimeOptions &options) {
@@ -355,7 +375,14 @@ QString availabilityProbeCommand(const DiagnosticRuntimeOptions &options) {
   const QString activeManifest = QString::fromLatin1(kActiveManifest);
   const QString activeEngine = QString::fromLatin1(kActiveEngine);
 
-  QString command = QStringLiteral("printf 'SSH connection successful\\n'; ");
+  QString command = QString::fromUtf8(R"SH(
+declare -A gui_revision_before
+for entry in MANIFEST:deploy/model/model.conf CONFIG:config/native_uart_live.conf RUNTIME:build_native/inference/native_uart_live_runtime; do
+  key=${entry%%:*}; path=${entry#*:}
+  if test -r "$path"; then gui_revision_before[$key]=$(sha256sum -- "$path" | cut -d ' ' -f1); else gui_revision_before[$key]=missing; fi
+done
+printf 'SSH connection successful\n';
+)SH");
   command +=
       QStringLiteral("repo_root=\"$(pwd -P)\"; %1; ").arg(stateVariables());
   command += QStringLiteral(
@@ -510,6 +537,17 @@ QString availabilityProbeCommand(const DiagnosticRuntimeOptions &options) {
                             "else printf '__JCG_REEXPORT_INPUTS__=no\\n'; fi; ")
                  .arg(preparationInputCheck(complete));
   command += finishedModelsCommand();
+  // Pin the existing deployment for the stop/prepare/validate/start workflow.
+  // This reads files only; it never probes an installer or transfers binaries.
+  command += QString::fromUtf8(R"SH(
+for entry in MANIFEST:deploy/model/model.conf CONFIG:config/native_uart_live.conf RUNTIME:build_native/inference/native_uart_live_runtime; do
+  key=${entry%%:*}; path=${entry#*:}
+  if test -r "$path"; then revision=$(sha256sum -- "$path" | cut -d ' ' -f1); else revision=missing; fi
+  test "$revision" = "${gui_revision_before[$key]}" || { echo 'Deployment changed during validation. Check again.' >&2; exit 4; }
+  printf '__JCG_DEPLOY_%s_REVISION__=' "$key"
+  if test "$revision" != missing; then printf '%s\n' "$revision"; else printf '\n'; fi
+done
+)SH");
   return command;
 }
 
@@ -518,4 +556,47 @@ QString rebuildRuntimeCommand() {
       "if test -f build_native/CMakeCache.txt; then "
       "bash run/rebuild_native.sh --target native_uart_live_runtime; "
       "else bash run/build_native.sh --tensorrt on --test; fi");
+}
+
+namespace {
+QString deploymentServiceGuard() {
+  return QString::fromUtf8(R"SH(
+set -euo pipefail
+service=dkfz-native-uart-live.service
+root=$(pwd -P)
+test "$(systemctl show --value -p NeedDaemonReload "$service")" = no
+test "$(readlink -f -- "$(systemctl show --value -p FragmentPath "$service")")" = "$root/deploy/dkfz-native-uart-live.service"
+test "$(systemctl show --value -p WorkingDirectory "$service")" = /opt/dkfz-live
+test -z "$(systemctl show --value -p RootDirectory "$service")"
+grep -Fqx -- 'ExecStart=/opt/dkfz-live/build_native/inference/native_uart_live_runtime --config /opt/dkfz-live/config/native_uart_live.conf' deploy/dkfz-native-uart-live.service
+binds=$(systemctl show --value -p BindReadOnlyPaths "$service")
+case "$binds" in "$root:/opt/dkfz-live"|"$root:/opt/dkfz-live:rbind"|"$root:/opt/dkfz-live:norbind") ;; *) echo 'Service project changed. Check again.' >&2; exit 1;; esac
+if test -s "$1" && kill -0 "$(cat -- "$1")" 2>/dev/null; then
+  echo 'Stop direct inference before deploying a model.' >&2; exit 1
+fi
+)SH");
+}
+QString guardedServiceCommand(bool password,const QString &script) {
+  const auto sudo = password ? "sudo -S -p '' -- bash -c " : "sudo -n -- bash -c ";
+  // Resolve the direct session path as the SSH user before entering sudo.
+  return stateVariables()+"; flock -x .jetson-control-deployment.lock "+sudo+
+      posixShellQuote(script)+" bash \"$pid_file\"";
+}
+}
+QString deploymentStopCommand(bool password) {
+  return guardedServiceCommand(password,deploymentServiceGuard()+
+      "state=$(systemctl is-active \"$service\" || true)\n"
+      "case \"$state\" in active|inactive|failed) ;; *) echo 'Wait for the service to finish changing state.' >&2; exit 1;; esac\n"
+      "systemctl stop \"$service\"\n");
+}
+QString deploymentStartCommand(bool password,const QString &manifest,const QString &config,const QString &runtime) {
+  const QRegularExpression sha("^[0-9a-f]{64}$");
+  for (const auto &value : {manifest,config,runtime})
+    if (!sha.match(value).hasMatch()) return "echo 'Deployment revision unavailable; Check again.' >&2; exit 1";
+  auto script = deploymentServiceGuard();
+  const QMap<QString,QString> files{{"deploy/model/model.conf",manifest},{"config/native_uart_live.conf",config},{"build_native/inference/native_uart_live_runtime",runtime}};
+  for(auto it=files.begin();it!=files.end();++it)
+    script += "test \"$(sha256sum -- "+posixShellQuote(it.key())+" | cut -d ' ' -f1)\" = "+posixShellQuote(it.value())+" || { echo 'Deployment changed after validation; Check again.' >&2; exit 1; }\n";
+  script += "# DKFZ_DEPLOY_START\nsystemctl start \"$service\"\nsystemctl is-active --quiet \"$service\"\n";
+  return guardedServiceCommand(password,script);
 }

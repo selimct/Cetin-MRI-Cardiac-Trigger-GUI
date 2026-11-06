@@ -3,6 +3,7 @@
 // Developed at the German Cancer Research Center (DKFZ).
 
 #include "console_output_classifier.h"
+#include "recovery_state.h"
 
 #include <QDateTime>
 #include <QJsonArray>
@@ -188,6 +189,12 @@ QString runtimeStatusText(const QJsonObject &object) {
     sections.append(inference);
   }
 
+  if (object.value("recovery_api_version").toInt() == 1 && object.value("active_recovery_enabled").isBool()) {
+    sections.append(QString("recovery=%1; active threshold=%2; request=%3")
+        .arg(object.value("active_recovery_enabled").toBool() ? "enabled" : "disabled",
+             object.value("active_recovery_enabled").toBool() ? jsonValueText(object.value("active_recovery_threshold")) : "null",
+             object.value("recovery_request_id").toString()));
+  }
   const QString resets = integerValue(object, "input_state_resets");
   if (!resets.isEmpty() && resets != QStringLiteral("0")) {
     sections.append(QStringLiteral("input resets=%1").arg(resets));
@@ -281,6 +288,14 @@ QByteArray serviceLogDisplayLine(const QByteArray &line) {
     return line;
   }
 
+  const auto telemetry = recovery::telemetryDescription(object);
+  if (!telemetry.isEmpty()) {
+    // Preserve original record and emission timestamps; never infer an origin
+    // or shift an event using the previous-frame score.
+    auto display = line.trimmed() + " | " + telemetry.toUtf8();
+    if (line.endsWith('\n')) display += '\n';
+    return display;
+  }
   const QString schema = object.value(QStringLiteral("schema")).toString();
   const QString code = object.value(QStringLiteral("code")).toString();
   if (schema != QStringLiteral("dkfz-live-diagnostic-v1") && code.isEmpty()) {

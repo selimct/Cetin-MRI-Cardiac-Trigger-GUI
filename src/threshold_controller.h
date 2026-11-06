@@ -36,6 +36,7 @@ public:
     QString auditPath() const;
 signals:
     void changed();
+    void policyChangeRequested(const QJsonObject &identity);
 
 private:
     enum class Phase

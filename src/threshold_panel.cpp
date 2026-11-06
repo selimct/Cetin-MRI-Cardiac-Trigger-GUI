@@ -71,7 +71,7 @@ ThresholdPanel::ThresholdPanel(ThresholdController *controller, QWidget *parent)
                        "Smaller peaks still wait for the selected detection threshold.");
     layout->addWidget(early_);
     auto *help = label(this);
-    help->setText("Numeric choices are manual snapshots. Early emission changes trigger timing; calibration error counts do not measure live performance with it enabled. Effective policy changes clear an unfinished trigger candidate. After applying, click Refresh deployed thresholds to check native readback; confirmation may wait for input. Status is never polled automatically.");
+    help->setText("Numeric choices are manual snapshots. Early emission changes trigger timing; calibration error counts do not measure live performance with it enabled. Changes to the primary threshold or early-emission policy clear an unfinished primary candidate. After applying, click Refresh deployed thresholds to check native readback; confirmation may wait for input. Status is never polled automatically.");
     layout->addWidget(help);
     layout->addStretch();
     connect(refresh_, &QPushButton::clicked, controller_, &ThresholdController::refresh);

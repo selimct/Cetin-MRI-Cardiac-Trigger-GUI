@@ -59,6 +59,7 @@ void RemoteCommandRunner::start(const SshConnectionOptions &options,
     return;
   }
 
+  ++generation_;
   cancelRequested_ = false;
   process_.setProgram(sshExecutable_);
   process_.setArguments(sshArguments(options, command));
@@ -77,9 +78,10 @@ void RemoteCommandRunner::cancel() {
   }
 
   cancelRequested_ = true;
+  const auto cancelledGeneration = generation_;
   process_.terminate();
-  QTimer::singleShot(2000, this, [this] {
-    if (isRunning()) {
+  QTimer::singleShot(2000, this, [this, cancelledGeneration] {
+    if (generation_ == cancelledGeneration && isRunning()) {
       process_.kill();
     }
   });

@@ -36,4 +36,5 @@ private:
   QProcess process_;
   QString sshExecutable_;
   bool cancelRequested_{false};
+  quint64 generation_{0};
 };

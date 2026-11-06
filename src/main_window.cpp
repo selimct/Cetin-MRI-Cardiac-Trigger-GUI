@@ -6,6 +6,10 @@
 
 #include "console_output_classifier.h"
 #include "threshold_panel.h"
+#include "recovery_panel.h"
+#include <QScrollArea>
+#include <QShortcut>
+#include <QRegularExpression>
 
 #include <QCheckBox>
 #include <QCloseEvent>
@@ -96,6 +100,7 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   auto *connectionLayout = new QFormLayout;
 
   hostEdit_ = new QLineEdit(connectionDialog);
+  hostEdit_->setObjectName("connectionHost");
   hostEdit_->setPlaceholderText(QStringLiteral("jetson or 192.168.1.50"));
   userEdit_ = new QLineEdit(connectionDialog);
   userEdit_->setPlaceholderText(
@@ -177,6 +182,7 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   connectionOuterLayout->addWidget(connectionDialogButtons);
 
   operationsTabs_ = new QTabWidget(central);
+  operationsTabs_->setObjectName("operationsTabs");
 
   auto *servicePage = new QWidget(operationsTabs_);
   auto *serviceLayout = new QVBoxLayout(servicePage);
@@ -189,6 +195,7 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
       new QCheckBox(QStringLiteral("I reviewed the installed configuration and "
                                    "verified the connected hardware"),
                     servicePage);
+  serviceSafetyCheck_->setObjectName("serviceHardwareReview");
   auto *serviceMaintenanceActions = new QHBoxLayout;
   serviceInstallButton_ =
       makeActionButton(QStringLiteral("Install / repair unit link"),
@@ -242,6 +249,10 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
       "Requires the full Jetson Python environment and a built runtime. Stop "
       "the service and direct inference first."));
   finishedModelForm->addRow(QStringLiteral("Finished models"), modelSelectionRow);
+  deployAndStartButton_ = makeActionButton(QStringLiteral("Deploy and start"), modelDeploymentGroup);
+  deployAndStartButton_->setObjectName("deployAndStart");
+  deployAndStartButton_->setToolTip("Stop the service, prepare the selected model, validate it and start it. Uses the startup recovery choice and existing hardware approval.");
+  finishedModelForm->addRow(deployAndStartButton_);
   finishedModelForm->addRow(reexportModelButton_);
   serviceLayout->addWidget(modelDeploymentGroup);
   serviceLayout->addWidget(serviceSafetyCheck_);
@@ -249,8 +260,17 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   serviceLayout->addLayout(serviceActions);
   serviceLayout->addStretch();
   operationsTabs_->addTab(servicePage, QStringLiteral("Installed service"));
-  auto *thresholdPanel = new ThresholdPanel(&thresholds_, operationsTabs_);
-  operationsTabs_->addTab(thresholdPanel, QStringLiteral("Live thresholds"));
+  auto *detectorPage = new QWidget(operationsTabs_);
+  auto *detectorLayout = new QVBoxLayout(detectorPage);
+  auto *thresholdPanel = new ThresholdPanel(&thresholds_, detectorPage);
+  recoveryPanel_ = new RecoveryPanel(&recovery_, detectorPage);
+  finishedModelForm->insertRow(1, recoveryPanel_->takeDeploymentControls());
+  detectorLayout->addWidget(thresholdPanel);
+  detectorLayout->addWidget(recoveryPanel_);
+  auto *detectorScroll = new QScrollArea(operationsTabs_);
+  detectorScroll->setWidgetResizable(true);
+  detectorScroll->setWidget(detectorPage);
+  operationsTabs_->addTab(detectorScroll, QStringLiteral("Detector controls"));
 
   auto *diagnosticPage = new QWidget(operationsTabs_);
   auto *diagnosticLayout = new QVBoxLayout(diagnosticPage);
@@ -400,6 +420,7 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   console_->document()->setMaximumBlockCount(20000);
 
   statusLabel_ = new QLabel(central);
+  statusLabel_->setObjectName("operationStatus");
   const QString sshStatus = runner_.sshExecutable().isEmpty()
                                 ? QStringLiteral("not found")
                                 : runner_.sshExecutable();
@@ -539,6 +560,7 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
         TaskKind::serviceLogs);
   });
 
+  connect(deployAndStartButton_, &QPushButton::clicked, this, &MainWindow::deployAndStart);
   connect(refreshModelsButton_, &QPushButton::clicked, this, [this] {
     runCommand(QStringLiteral("List finished models"), finishedModelsCommand(), TaskKind::listModels);
   });
@@ -550,6 +572,7 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
     modelDirectoryEdit_->setText(model.directory);
     variantCombo_->setCurrentText(model.variant);
     syncFinishedModelSelection();
+    updateActionAvailability();
   });
   connect(reexportModelButton_, &QPushButton::clicked, this, [this] {
     auto options = diagnosticOptions();
@@ -570,7 +593,7 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
       return;
     }
     runCommand(QStringLiteral("Prepare model on Jetson"),
-               prepareModelCommand(options), TaskKind::prepareModel);
+               prepareStoppedModelCommand(options), TaskKind::prepareModel);
   });
   connect(validateRuntimeButton_, &QPushButton::clicked, this, [this] {
     const auto options = diagnosticOptions();
@@ -734,12 +757,19 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
                           QColor(QStringLiteral("#d45b5b")));
             statusLabel_->setText(message);
             if (availabilityCheck) {
+              invalidateAvailability();
+              thresholds_.invalidate();
+              recovery_.discardReadback();
               serviceAvailabilityLabel_->setText(QStringLiteral(
                   "Availability check could not start. Service actions are "
                   "disabled."));
               diagnosticAvailabilityLabel_->setText(
                   QStringLiteral("Availability check could not start: %1")
                       .arg(message));
+            }
+            if (activeTask_ == TaskKind::deployWorkflow) {
+              deploymentStep_ = DeploymentStep::none;
+              invalidateAvailability();
             }
             activeTask_ = TaskKind::none;
             updateActionAvailability();
@@ -795,9 +825,22 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
         updateActionAvailability();
       });
 
+  recovery_.configure(connectionOptions(), sudoPasswordEdit_->text());
+  connect(&thresholds_, &ThresholdController::policyChangeRequested, &recovery_, &RecoveryController::notePrimaryChange);
+  connect(&recovery_, &RecoveryController::changed, this, &MainWindow::updateActionAvailability);
+  // This continuation belongs only to an explicit Check/Enter request. It
+  // serializes readbacks over the existing SSH transport without polling.
+  connect(&recovery_, &RecoveryController::changed, this, [this] {
+    if (primaryReadbackPending_ && !recovery_.blocking()) {
+      primaryReadbackPending_ = false;
+      thresholds_.refresh();
+    }
+  });
+  connect(recoveryPanel_, &RecoveryPanel::deploymentPolicyChanged, this, &MainWindow::updateActionAvailability);
   thresholds_.configure(connectionOptions(), sudoPasswordEdit_->text());
   connect(&thresholds_, &ThresholdController::changed, this, &MainWindow::updateActionAvailability);
   const auto configureThresholds = [this] {
+    recovery_.configure(connectionOptions(), sudoPasswordEdit_->text());
     thresholds_.configure(connectionOptions(), sudoPasswordEdit_->text());
   };
   connect(hostEdit_, &QLineEdit::textChanged, this, configureThresholds);
@@ -806,12 +849,19 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   connect(identityFileEdit_, &QLineEdit::textChanged, this, configureThresholds);
   connect(remoteDirectoryEdit_, &QLineEdit::textChanged, this, configureThresholds);
   connect(sudoPasswordEdit_, &QLineEdit::textChanged, this, configureThresholds);
+  for (auto *scope : {static_cast<QWidget *>(operationsTabs_), static_cast<QWidget *>(connectionDialog)}) {
+    for (const auto key : {Qt::Key_Return, Qt::Key_Enter}) {
+      auto *refreshShortcut = new QShortcut(QKeySequence(key), scope);
+      refreshShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+      connect(refreshShortcut, &QShortcut::activated, this, &MainWindow::checkAvailability);
+    }
+  }
   updateDiagnosticModeControls();
 }
 
 void MainWindow::closeEvent(QCloseEvent *event) {
-  if (thresholds_.blocking()) {
-    statusLabel_->setText(QStringLiteral("Wait for the threshold operation to finish before closing."));
+  if (thresholds_.blocking() || recovery_.blocking() || deploymentStep_ != DeploymentStep::none) {
+    statusLabel_->setText(QStringLiteral("Wait for the current operation to finish, or cancel it before closing."));
     event->ignore();
     return;
   }
@@ -878,6 +928,7 @@ DiagnosticRuntimeOptions MainWindow::diagnosticOptions() const {
       .sessionLogPath = sessionLogPathEdit_->text().trimmed(),
       .rawCapturePath = rawCapturePathEdit_->text().trimmed(),
       .emitProbabilities = emitProbabilitiesCheck_->isChecked(),
+      .forceRecoveryOff = recoveryPanel_->forceRecoveryOff(),
   };
 }
 
@@ -890,7 +941,7 @@ QString MainWindow::remoteSudoCommand(const QString &command) const {
 
 void MainWindow::runCommand(const QString &label, const QString &command,
                             TaskKind kind) {
-  if (thresholds_.blocking()) {
+  if (thresholds_.blocking() || recovery_.blocking()) {
     statusLabel_->setText(QStringLiteral("Wait for the threshold operation to finish."));
     return;
   }
@@ -904,15 +955,17 @@ void MainWindow::runCommand(const QString &label, const QString &command,
   statusLabel_->setText(QStringLiteral("Starting %1…").arg(label));
   QByteArray standardInput;
   if ((kind == TaskKind::serviceMutation ||
-       kind == TaskKind::serviceUnitRepair) &&
+       kind == TaskKind::serviceUnitRepair ||
+       (kind == TaskKind::deployWorkflow && (deploymentStep_ == DeploymentStep::stop || deploymentStep_ == DeploymentStep::start))) &&
       !sudoPasswordEdit_->text().isEmpty()) {
     standardInput = sudoPasswordEdit_->text().toUtf8();
     standardInput.append('\n');
   }
   const SshConnectionOptions options = connectionOptions();
-  if (kind == TaskKind::prepareModel || kind == TaskKind::reexportModel || kind == TaskKind::serviceMutation ||
-      kind == TaskKind::serviceUnitRepair) thresholds_.invalidate();
-  if (kind == TaskKind::reexportModel) invalidateAvailability();
+  const bool mutation = kind == TaskKind::prepareModel || kind == TaskKind::reexportModel ||
+      kind == TaskKind::serviceMutation || kind == TaskKind::serviceUnitRepair || kind == TaskKind::rebuildRuntime;
+  if (mutation) invalidateAvailability(); // A failed/cancelled request can still have changed remote state.
+  if (mutation || kind == TaskKind::deployWorkflow) { thresholds_.invalidate(); recovery_.invalidate(); }
   runner_.start(options, (kind == TaskKind::prepareModel || kind == TaskKind::reexportModel)
       ? thresholds::deploymentLock(command) : command, standardInput);
   if (options.acceptNewHostKey && runner_.isRunning()) {
@@ -1044,6 +1097,7 @@ void MainWindow::addCommandToHistory(const QString &command) {
 }
 
 void MainWindow::checkAvailability() {
+  if (runner_.isRunning() || controlRunner_.isRunning() || thresholds_.blocking() || recovery_.blocking() || deploymentStep_ != DeploymentStep::none) return;
   const DiagnosticRuntimeOptions options = diagnosticOptions();
   const QString error = validateDiagnosticOptions(options);
   if (!error.isEmpty()) {
@@ -1061,6 +1115,8 @@ void MainWindow::checkAvailability() {
 
 void MainWindow::invalidateAvailability() {
   capabilities_ = {};
+  primaryReadbackPending_ = false;
+  observedManifestRevision_.clear(); observedConfigRevision_.clear(); observedRuntimeRevision_.clear();
   serviceSafetyCheck_->setChecked(false);
   gpioSafetyCheck_->setChecked(false);
   serviceAvailabilityLabel_->setText(QStringLiteral(
@@ -1118,6 +1174,9 @@ void MainWindow::applyAvailabilityProbe(const QByteArray &output) {
   capabilities_.activeSourceDirectory = value("__JCG_ACTIVE_SOURCE__");
   capabilities_.serviceInputState = value("__JCG_SERVICE_INPUT__");
   capabilities_.serviceState = value("__JCG_SERVICE_STATE__");
+  observedManifestRevision_ = value("__JCG_DEPLOY_MANIFEST_REVISION__");
+  observedConfigRevision_ = value("__JCG_DEPLOY_CONFIG_REVISION__");
+  observedRuntimeRevision_ = value("__JCG_DEPLOY_RUNTIME_REVISION__");
 
   if (capabilities_.serviceReady) {
     serviceAvailabilityLabel_->setText(
@@ -1240,8 +1299,10 @@ void MainWindow::applyFinishedModels(const QByteArray &output) {
       ? QStringLiteral("No finished models loaded — refresh")
       : QStringLiteral("Select a finished model…"));
   for (const auto &model : finishedModels_) {
-    finishedModelCombo_->addItem(QStringLiteral("%1 (%2) — %3")
-        .arg(model.name, model.variant, model.directory));
+    finishedModelCombo_->addItem(model.name + (model.variant == "tuned" ? " — Fine-tuned" : "") +
+        (model.recoverySupported ? " — Recovery supported" : " — Current output only"));
+    finishedModelCombo_->setItemData(finishedModelCombo_->count()-1,
+        QString("Source: %1\nPublished artifact: %2").arg(model.directory, model.variant), Qt::ToolTipRole);
   }
   syncFinishedModelSelection();
 }
@@ -1263,8 +1324,9 @@ void MainWindow::syncFinishedModelSelection() {
 void MainWindow::updateActionAvailability() {
   const bool mainBusy = runner_.isRunning();
   const bool controlBusy = controlRunner_.isRunning();
-  const bool anyBusy = mainBusy || controlBusy || thresholds_.blocking();
-  thresholds_.setExternalBusy((mainBusy && activeTask_ != TaskKind::serviceLogs) || controlBusy);
+  const bool anyBusy = mainBusy || controlBusy || thresholds_.blocking() || recovery_.blocking() || deploymentStep_ != DeploymentStep::none;
+  thresholds_.setExternalBusy((mainBusy && activeTask_ != TaskKind::serviceLogs) || controlBusy || recovery_.blocking() || deploymentStep_ != DeploymentStep::none);
+  recovery_.setExternalBusy((mainBusy && activeTask_ != TaskKind::serviceLogs) || controlBusy || thresholds_.blocking() || deploymentStep_ != DeploymentStep::none);
   const QString optionError = validateDiagnosticOptions(diagnosticOptions());
   const bool parametersValid = optionError.isEmpty();
   const bool gpioMode =
@@ -1282,12 +1344,18 @@ void MainWindow::updateActionAvailability() {
   connectionCheckButton_->setEnabled(!anyBusy);
   healthButton_->setEnabled(!anyBusy);
 
+  const bool publishedSelection = finishedModelCombo_->currentIndex() > 0;
+  deployAndStartButton_->setEnabled(!anyBusy && parametersValid &&
+      (publishedSelection || (capabilities_.serviceContract && capabilities_.serviceLinkedToCheckout && capabilities_.runtime &&
+       capabilities_.prepareScript && (capabilities_.prepareInputs || capabilities_.reexportInputs))) &&
+      !capabilities_.directInferenceActive && serviceSafetyCheck_->isChecked());
+
   serviceStatusButton_->setEnabled(!anyBusy && capabilities_.service);
   serviceInstallButton_->setEnabled(
       !anyBusy && capabilities_.known && capabilities_.serviceUnit &&
       !capabilities_.serviceActive && !capabilities_.directInferenceActive);
   serviceReloadButton_->setEnabled(!anyBusy && capabilities_.service);
-  serviceSafetyCheck_->setEnabled(!anyBusy && capabilities_.serviceReady);
+  serviceSafetyCheck_->setEnabled(!anyBusy && (publishedSelection || capabilities_.serviceReady || (capabilities_.serviceContract && capabilities_.runtime && capabilities_.serviceConfig)));
   serviceStartButton_->setEnabled(
       !anyBusy && capabilities_.serviceReady && !capabilities_.serviceActive &&
       !capabilities_.directInferenceActive && serviceSafetyCheck_->isChecked());
@@ -1379,7 +1447,7 @@ void MainWindow::finishMainCommand(int exitCode,
   const qint64 elapsed = commandTimer_.isValid() ? commandTimer_.elapsed() : 0;
 
   if (completedTask == TaskKind::availabilityProbe &&
-      exitStatus == QProcess::NormalExit && exitCode == 0) {
+      exitStatus == QProcess::NormalExit && exitCode == 0 && !cancelled) {
     applyAvailabilityProbe(activeStandardOutput_);
   } else if (completedTask == TaskKind::listModels && !cancelled &&
              exitStatus == QProcess::NormalExit && exitCode == 0) {
@@ -1387,6 +1455,9 @@ void MainWindow::finishMainCommand(int exitCode,
     appendConsole(QStringLiteral("Loaded %1 saved model variants from finished_models.\n")
                       .arg(finishedModels_.size()), informationalColor());
   } else if (completedTask == TaskKind::availabilityProbe) {
+    invalidateAvailability();
+    thresholds_.invalidate();
+    recovery_.discardReadback();
     serviceAvailabilityLabel_->setText(QStringLiteral(
         "Availability check failed. Service actions are disabled; retry from "
         "the main window."));
@@ -1431,5 +1502,85 @@ void MainWindow::finishMainCommand(int exitCode,
     statusLabel_->setText(summary);
   }
   activeTask_ = TaskKind::none;
+  if (completedTask == TaskKind::deployWorkflow) {
+    nextDeploymentStep(exitStatus == QProcess::NormalExit && exitCode == 0 && !cancelled);
+    return;
+  }
+  updateActionAvailability();
+  if (completedTask == TaskKind::availabilityProbe && exitStatus == QProcess::NormalExit && exitCode == 0 && !cancelled) {
+    // Check/Enter explicitly requests these snapshots. Apply, Start and model
+    // selection do not schedule another status request.
+    primaryReadbackPending_ = true;
+    recovery_.refresh();
+  }
+}
+
+void MainWindow::deployAndStart() {
+  if (!deployAndStartButton_->isEnabled()) return;
+  deploymentOptions_ = diagnosticOptions();
+  deploymentStep_ = DeploymentStep::preflight;
+  runCommand("Checking selected model before deployment", availabilityProbeCommand(deploymentOptions_), TaskKind::deployWorkflow);
+}
+
+void MainWindow::nextDeploymentStep(bool success) {
+  if (!success) {
+    deploymentStep_ = DeploymentStep::none;
+    invalidateAvailability();
+    statusLabel_->setText("Deployment did not finish. Review the console and Check the Jetson before continuing. The selected model was not confirmed running.");
+    return;
+  }
+  switch (deploymentStep_) {
+  case DeploymentStep::preflight: {
+    applyAvailabilityProbe(activeStandardOutput_);
+    const QRegularExpression sha("^[0-9a-f]{64}$");
+    if (!sha.match(observedConfigRevision_).hasMatch() || !sha.match(observedRuntimeRevision_).hasMatch()) {
+      nextDeploymentStep(false); return;
+    }
+    if (!capabilities_.serviceContract || !capabilities_.serviceLinkedToCheckout || !capabilities_.runtime ||
+        !capabilities_.serviceConfig || !capabilities_.prepareScript || capabilities_.directInferenceActive ||
+        (!capabilities_.prepareInputs && !capabilities_.reexportInputs)) {
+      nextDeploymentStep(false); return;
+    }
+    // All discovery and checks belong to this explicit action. Selecting a
+    // model remains local and does not require another manual Check.
+    if (!capabilities_.prepareInputs && capabilities_.reexportInputs) deploymentOptions_.preparationMode = "complete";
+    deploymentConfigRevision_ = observedConfigRevision_;
+    deploymentRuntimeRevision_ = observedRuntimeRevision_;
+    deploymentStep_ = DeploymentStep::stop;
+    runCommand("Deploying model: stopping service", deploymentStopCommand(!sudoPasswordEdit_->text().isEmpty()), TaskKind::deployWorkflow);
+    return;
+  }
+  case DeploymentStep::stop:
+    deploymentStep_ = DeploymentStep::prepare;
+    runCommand("Deploying model: preparing", thresholds::deploymentLock(prepareStoppedModelCommand(deploymentOptions_)), TaskKind::deployWorkflow);
+    return;
+  case DeploymentStep::prepare:
+    deploymentStep_ = DeploymentStep::validate;
+    runCommand("Deploying model: validating", availabilityProbeCommand(deploymentOptions_), TaskKind::deployWorkflow);
+    return;
+  case DeploymentStep::validate:
+    applyAvailabilityProbe(activeStandardOutput_);
+    if (!capabilities_.serviceReady || !capabilities_.activeSelectionMatches || capabilities_.serviceActive || observedManifestRevision_.isEmpty() ||
+        observedConfigRevision_ != deploymentConfigRevision_ || observedRuntimeRevision_ != deploymentRuntimeRevision_) {
+      nextDeploymentStep(false); return;
+    }
+    deploymentRevision_ = observedManifestRevision_;
+    deploymentStep_ = DeploymentStep::start;
+    runCommand("Deploying model: starting", deploymentStartCommand(!sudoPasswordEdit_->text().isEmpty(),
+        deploymentRevision_, deploymentConfigRevision_, deploymentRuntimeRevision_), TaskKind::deployWorkflow);
+    return;
+  case DeploymentStep::start:
+    deploymentStep_ = DeploymentStep::none;
+    // systemctl start/is-active acknowledged this explicit action. Keep Stop
+    // available, without claiming fresh detector readback or issuing a query.
+    capabilities_.serviceActive = true;
+    capabilities_.serviceState = "active";
+    capabilities_.directRuntimeReady = false;
+    serviceAvailabilityLabel_->setText("Service start acknowledged. Press Check or Enter for current runtime information.");
+    statusLabel_->setText("Service started. Press Check or Enter to refresh recovery status.");
+    updateActionAvailability();
+    return;
+  case DeploymentStep::none: break;
+  }
   updateActionAvailability();
 }

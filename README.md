@@ -12,15 +12,49 @@ Developed at the German Cancer Research Center (DKFZ).
 
 ## Jetson Control GUI
 
-A local Qt 6 desktop application for running commands on the Jetson over SSH
-and viewing stdout, stderr, exit status, and service logs. Nothing from this
-directory runs on the Jetson; commands are executed through its existing SSH
-server.
+A local Qt 6 desktop application for controlling the existing live stack on the
+Jetson over SSH and viewing command output and service logs. Install the normal
+GUI on the desktop; no recovery add-on, helper package, Python installation or
+GUI-managed software update is required on the Jetson. The desktop needs no
+local live-stack checkout. `remote_directory` is the existing remote project root.
 
-This repository contains only the desktop GUI. Keep or clone it independently
-from the live-stack repository. The desktop does not need a local live-stack
-checkout: live-stack is required only on the Jetson, and `remote_directory`
-always refers to that remote checkout.
+For normal use:
+
+1. Open **Connection**, enter the SSH settings, and press **Check** or **Enter**.
+2. Select a published model from **Finished models**.
+3. Choose **Startup recovery**: **Use saved recovery settings**, or
+   **Recovery off — current output only**.
+4. Review the existing hardware checkbox and click **Deploy and start**. This
+   sends the existing stop → prepare → validate → start commands over SSH.
+5. Press **Check**, **Refresh**, or **Enter** when you want updated information.
+
+To turn recovery off and back on for the **same two-output model**, keep that
+model selected, change only Startup recovery, and deploy/start it again. Off
+forwards `--no-recovery` to preparation. Saved settings omit that flag and restore
+the source policy. Both keep `recovery_head=true`; no retraining or new checkpoint
+is needed. Restoring saved settings enables recovery only if the source policy
+enables it and has a valid threshold; a null threshold or disabled source policy
+stays off. This works without a live recovery switching API, provided the runtime
+already supports two-output recovery models.
+
+Selecting a model or editing a draft sends no SSH commands. Apply, preparation,
+service start and restart do not schedule status refreshes. Check and Enter read
+the current deployment plus recovery and primary policies once; the individual
+Refresh buttons read their respective state. There is no periodic polling.
+Deploy and start performs the validation needed to start safely, then leaves
+runtime policy confirmation to your next Check/Refresh/Enter action.
+
+The GUI does not copy or install runtime binaries. It uses only the remote
+stack's existing commands and configuration. Live controls are available only
+when that stack already exposes a supported recovery API and matching readback;
+otherwise use the startup choice and stop/prepare/start cycle. Missing live
+support is never presented as a requirement to install something through the GUI.
+
+Model preparation retains the existing backend's export/parity environment
+requirements described below. Failed or cancelled deployment stops the sequence;
+the GUI does not start an unvalidated model. It checks the deployment,
+configuration and runtime revisions again before starting. Individual preparation
+and service actions remain available for manual operation.
 
 | Computer | Required checkout | Purpose |
 | --- | --- | --- |
@@ -149,12 +183,11 @@ Stop action active. `input_paused` is shown in amber. Once stable moving input
 returns, the status changes back to running; the runtime has cleared its old
 temporal state and rebuilds a completely fresh model window before inference.
 
-The GUI does not poll the Jetson in the background. Editing fields or selecting
-a model sends no requests; Check and Refresh buttons explicitly retrieve status.
-Threshold actions save only when clicked; use **Refresh deployed thresholds**
-afterward to confirm application. Pending confirmation does not block Refresh
-or the rest of the GUI. Explicitly started inference and log streams remain
-attached until stopped.
+The GUI does not poll the Jetson in the background. Check, Refresh, and Enter
+are explicit read requests. Primary or recovery Apply saves a request only;
+use Check/Refresh/Enter to read confirmation. Input paused by the runtime can
+leave a request pending until another completed frame. Explicitly started
+inference and log streams remain attached until stopped.
 
 Availability checks are always manual. After changing the connection or remote
 project root, select **Check** in the Connection dialog. After changing the
@@ -176,6 +209,99 @@ and when the application exits. With an empty password field, service actions
 continue to use `sudo -n`, which supports a narrow passwordless sudoers rule.
 Model preparation and initial TensorRT builds can be long-running; cancelling
 their SSH process is not guaranteed to terminate every remote child.
+
+### Recovery detector controls
+
+**Detector controls** retains the primary threshold presets/custom value,
+automatic/manual selection and early emission. Recovery has its own edited,
+saved/requested and confirmed-active settings. All discovery, configuration
+reads and operations use SSH beneath the configured remote project directory;
+the desktop needs no local live-stack checkout. Discovery and read-only
+recovery metadata use remote shell/coreutils and local Qt JSON parsing, so a
+runtime-only target needs no Python.
+
+Choose **Use saved recovery settings** or **Recovery off — current output only** in the recovery deployment section. This is a preparation
+setting beside model selection: both preparation modes forward `--no-recovery`
+when selected. Restoring the saved deployment selection only edits that draft.
+Use **Deploy and start** to apply it, or the individual service/preparation actions. Omitting the flag
+respects disabled source defaults and null calibration; there is no preparation
+flag to force recovery on, and no training JSON is rewritten. Preparation/export
+itself retains the backend's existing environment requirements described above.
+
+Existing backends support deployment control only. **Refresh recovery state**
+checks the deployed manifest/source and the actual remote native API version.
+When already provided by the remote stack, live **Apply recovery** and
+**Restore calibrated recovery** use
+`build_native/inference/native_live_recovery_control` with schema
+`dkfz-live-recovery-control-v1`, `api_version=1`, plus fresh engine- and
+invocation-bound diagnostics. The GUI never installs this interface or its runtime.
+A similarly named script does not establish support. Direct processes are unsupported by v1;
+service journal status cannot confirm them.
+
+On supported services, select calibrated recovery or explicitly choose
+**Advanced: custom threshold**, enter a finite number in `(0, 1]`, edit the
+checkbox and click Apply. Disabling retains the saved selected threshold;
+null active threshold means off. A null calibrated threshold is shown as
+**Recovery disabled by calibration** and never replaced with an arbitrary
+value. Restore honors the source's disabled default. Scalar deployments show
+**Recovery unavailable: single-output model**. Recovery requests preserve all
+primary settings, and primary writers preserve recovery via a separate override.
+
+A successful request means saved/pending. Click Refresh explicitly to obtain
+native application readback; paused input can wait for the next completed
+frame. Old primary-only runtime status is insufficient confirmation. Connection,
+deployment or service changes invalidate confirmation; stale revisions reject
+mutations. Live requests belong to one service invocation. After restart,
+the deployed policy applies; the last selection remains available for a new
+explicit request with matching engine identity. Use deployment-time current-only
+for current-only startup across restarts.
+
+The collapsed **Model and calibration details** section uses the *deployed* `source_model_dir` and variant, never the
+newly selected GUI model. Best uses `train_config.json`; tuned uses
+`tuning/tuned_config.json`. Source metadata is a saved snapshot, not active
+runtime confirmation. Its original byte identity is unverified because existing
+manifests do not pin a source-config hash. Missing, mismatched, changed-during-read
+or newer source files are unavailable/unconfirmed; restoration refuses an
+unusable source. Published `*_recovery` and `*_lopo_recovery` artifacts are both
+discovered as best from `best.pth` + `train_config.json`; intermediate tuning/fold
+artifacts outside finished_models are excluded. Capability/provenance never
+comes from a name suffix.
+
+Recovery models share one LSTM: current predicts the current frame and previous
+predicts the previous frame with current context. Recovered events alone add
+one frame of lookahead, displayed as `1000 * frame_size_raw / raw_hz` ms. Recovery
+only training declares the primary weights frozen; verified-unchanged provenance
+is shown separately. Missing provenance is unknown, and joint training does not
+guarantee equivalence to an independent single-output model. Starting
+current-only reproduces a frozen primary detector only with identical
+preprocessing, thresholds and runtime settings. Switching recovery off live
+cannot undo earlier emissions or their shared holdoff.
+
+The panel displays calibration FP allowance, saved event metrics and the native
+early-emission audit when present, including emission threshold, FP budget and
+baseline FP/FN counts. Missing baseline counts stay unavailable. These are
+calibration results, not outer-test or live measurements; a runtime threshold
+does not enforce the FP allowance. Audit applicability is unconfirmed and the
+policy is marked customized when primary threshold, early emission, holdoff or
+recovery policy differs. Nothing silently recalibrates. Recovery-head nested
+LOPO is labeled conditional on the frozen pretrained base: outer patients were
+excluded from head training/selection, but base/preprocessing may already have
+seen them. The entire detector is not established as patient-unseen. A selected
+fixed epoch is shown only when supplied; training length is not substituted.
+Frozen-base SHA256 is distinct from engine CRC32 or recovery-checkpoint identity.
+
+Probability records label `probability` as the current-head score and
+`recovery_prob` as the previous-frame score; `recovery_emitted_now` identifies
+an emission on the current record. Trigger-event probability is the accepted
+event score from either head; without explicit origin/matching probability
+telemetry its head is unknown. Original emission timestamps remain intact and
+no recovery event counts are inferred from timing. These fields are separate
+from input-pause recovery/hysteresis diagnostics.
+
+The optional training wrapper `./train_finished_models_recovery.sh --lopo
+--num-epochs 35` is an explicit backend training job; no runtime control launches
+it. Reports and fold/epoch checkpoints remain in the training workflow's model
+directory, with published final artifacts discovered only under finished_models.
 
 ## Download a release
 

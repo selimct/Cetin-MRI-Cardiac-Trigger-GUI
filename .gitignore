@@ -16,3 +16,4 @@
 /jetson_key.*
 *.user
 .vscode
+backend/

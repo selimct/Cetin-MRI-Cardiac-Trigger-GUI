@@ -7,6 +7,8 @@
 #include "diagnostic_command_builder.h"
 #include "remote_command_runner.h"
 #include "threshold_controller.h"
+#include "recovery_controller.h"
+class RecoveryPanel;
 
 #include <QElapsedTimer>
 #include <QMainWindow>
@@ -47,6 +49,7 @@ private:
     reexportModel,
     rebuildRuntime,
     directInference,
+    deployWorkflow,
   };
 
   struct RemoteCapabilities {
@@ -84,6 +87,8 @@ private:
   void runCommand(const QString &label, const QString &command,
                   TaskKind kind = TaskKind::ordinary);
   void stopDirectInference();
+  void deployAndStart();
+  void nextDeploymentStep(bool success);
   void appendConsole(const QString &text, const QColor &color);
   void appendConsoleBytes(const QByteArray &data, const QColor &color);
   void appendClassifiedConsoleBytes(QByteArray &pending,
@@ -104,6 +109,8 @@ private:
   RemoteCommandRunner runner_;
   RemoteCommandRunner controlRunner_;
   ThresholdController thresholds_;
+  RecoveryController recovery_;
+  RecoveryPanel *recoveryPanel_{nullptr};
   QElapsedTimer commandTimer_;
   QElapsedTimer controlTimer_;
   TaskKind activeTask_{TaskKind::none};
@@ -114,6 +121,12 @@ private:
   QByteArray controlStandardOutputDisplayBuffer_;
   QByteArray controlStandardErrorDisplayBuffer_;
   RemoteCapabilities capabilities_;
+  enum class DeploymentStep { none, preflight, stop, prepare, validate, start };
+  DeploymentStep deploymentStep_{DeploymentStep::none};
+  DiagnosticRuntimeOptions deploymentOptions_;
+  QString observedManifestRevision_, observedConfigRevision_, observedRuntimeRevision_;
+  bool primaryReadbackPending_{false};
+  QString deploymentRevision_, deploymentConfigRevision_, deploymentRuntimeRevision_;
 
   QLineEdit *hostEdit_{nullptr};
   QLineEdit *userEdit_{nullptr};
@@ -154,6 +167,7 @@ private:
   QPushButton *diagnosticCheckButton_{nullptr};
   QPushButton *prepareModelButton_{nullptr};
   QPushButton *reexportModelButton_{nullptr};
+  QPushButton *deployAndStartButton_{nullptr};
   QPushButton *validateRuntimeButton_{nullptr};
   QPushButton *startInferenceButton_{nullptr};
   QPushButton *stopInferenceButton_{nullptr};

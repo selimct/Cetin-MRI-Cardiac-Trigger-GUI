@@ -3,10 +3,14 @@
 // Developed at the German Cancer Research Center (DKFZ).
 
 #include "diagnostic_command_builder.h"
+#include "ssh_command_builder.h"
 
 #include <QProcess>
 #include <QStandardPaths>
 #include <QTest>
+#include <QFile>
+#include <QDir>
+#include <QTemporaryDir>
 
 class DiagnosticCommandBuilderTest final : public QObject {
   Q_OBJECT
@@ -22,6 +26,8 @@ private slots:
   void buildsAvailabilityProbe();
   void buildsNativeRuntimeRebuildCommand();
   void generatedCommandsParseAsBash();
+  void rejectsFilesChangedDuringValidation();
+  void preparationChecksTheCurrentServiceState();
 };
 
 void DiagnosticCommandBuilderTest::validatesParameters() {
@@ -170,7 +176,7 @@ void DiagnosticCommandBuilderTest::buildsAvailabilityProbe() {
   QVERIFY(command.contains(QStringLiteral("__JCG_DIRECT_READY__")));
   QVERIFY(command.contains(QStringLiteral("__JCG_PREPARE_INPUTS__")));
   QVERIFY(command.contains(QStringLiteral("__JCG_REEXPORT_INPUTS__")));
-  QVERIFY(command.contains(QStringLiteral("__JCG_FINISHED_MODELS__")));
+  QVERIFY(command.contains(QStringLiteral("__JCG_FINISHED_MODEL__")));
   QVERIFY(command.contains(QStringLiteral("deploy/model/model.conf")));
   QVERIFY(
       command.contains(QStringLiteral("models_noCV/target_r/target_r.onnx")));
@@ -220,7 +226,9 @@ void DiagnosticCommandBuilderTest::generatedCommandsParseAsBash() {
       startDirectRuntimeCommand(options), stopDirectRuntimeCommand(),
       serviceUnitRepairCommand(false),    serviceUnitRepairCommand(true),
       availabilityProbeCommand(options), rebuildRuntimeCommand(),
-      finishedModelsCommand(), reexportModelCommand(options),
+      finishedModelsCommand(), reexportModelCommand(options), prepareStoppedModelCommand(options),
+      deploymentStopCommand(false), deploymentStopCommand(true),
+      deploymentStartCommand(false, QString(64,'a'), QString(64,'b'), QString(64,'c')),
   };
 
   for (const QString &command : commands) {
@@ -237,6 +245,56 @@ void DiagnosticCommandBuilderTest::generatedCommandsParseAsBash() {
     QVERIFY2(process.exitCode() == 0,
              qPrintable(QString::fromUtf8(process.readAllStandardError())));
   }
+}
+
+void DiagnosticCommandBuilderTest::rejectsFilesChangedDuringValidation() {
+#ifdef Q_OS_WIN
+  QSKIP("Linux fake host filesystem fixture");
+#else
+  for (const auto &changed : {"config/native_uart_live.conf", "deploy/model/model.conf", "build_native/inference/native_uart_live_runtime"}) {
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const auto write = [&](const QString &path, const QByteArray &bytes, bool executable = false) {
+      QVERIFY(QDir().mkpath(QFileInfo(path).absolutePath())); QFile file(path); QVERIFY(file.open(QIODevice::WriteOnly));
+      QCOMPARE(file.write(bytes), bytes.size()); file.close();
+      if (executable) QVERIFY(file.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+    };
+    write(dir.filePath("config/native_uart_live.conf"),
+      "input_reset_enabled=true\necg_baseline_reset_ms=100\nstuck_signal_reset_ms=100\ninput_recovery_ms=100\nwatchdog_enabled=true\nuart_timeout_ms=100\nsample_timeout_ms=100\n");
+    write(dir.filePath("deploy/model/model.conf"), "model_name=heart\nmodel_variant=best\nsource_model_dir=finished_models/heart\n");
+    write(dir.filePath("deploy/model/model.engine"), "engine");
+    write(dir.filePath("bin/systemctl"), "#!/bin/bash\nif [[ $1 == is-active ]]; then echo inactive; fi\nexit 1\n", true);
+    write(dir.filePath("build_native/inference/native_uart_live_runtime"),
+      "#!/bin/bash\nprintf '# changed while validating\\n' >> " + posixShellQuote(changed).toUtf8() + "\nexit 0\n", true);
+    DiagnosticRuntimeOptions options{.modelName="heart",.modelDirectory="finished_models/heart"};
+    QProcess process; auto env = QProcessEnvironment::systemEnvironment();
+    env.insert("PATH", dir.filePath("bin") + ':' + env.value("PATH")); process.setProcessEnvironment(env);
+    process.setWorkingDirectory(dir.path()); process.start("bash", {"-c", availabilityProbeCommand(options)});
+    QVERIFY(process.waitForStarted()); QVERIFY(process.waitForFinished(10000));
+    QVERIFY(process.exitCode() != 0);
+    QVERIFY(process.readAllStandardError().contains("Deployment changed during validation"));
+  }
+#endif
+}
+
+void DiagnosticCommandBuilderTest::preparationChecksTheCurrentServiceState() {
+#ifdef Q_OS_WIN
+  QSKIP("Linux fake host process fixture");
+#else
+  QTemporaryDir dir; QVERIFY(dir.isValid());
+  QVERIFY(QDir().mkpath(dir.filePath("bin")));
+  QFile systemctl(dir.filePath("bin/systemctl")); QVERIFY(systemctl.open(QIODevice::WriteOnly));
+  systemctl.write("#!/bin/bash\necho active\n"); systemctl.close();
+  QVERIFY(systemctl.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+  QFile prepare(dir.filePath("prepare_model.sh")); QVERIFY(prepare.open(QIODevice::WriteOnly));
+  prepare.write("#!/bin/bash\ntouch preparation-was-run\n"); prepare.close();
+  QVERIFY(prepare.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+  DiagnosticRuntimeOptions options{.modelName="heart", .modelDirectory="finished_models/heart"};
+  QProcess process; auto env=QProcessEnvironment::systemEnvironment(); env.insert("PATH",dir.filePath("bin")+':'+env.value("PATH"));
+  process.setProcessEnvironment(env); process.setWorkingDirectory(dir.path());
+  process.start("bash", {"-c", prepareStoppedModelCommand(options)});
+  QVERIFY(process.waitForStarted()); QVERIFY(process.waitForFinished());
+  QCOMPARE(process.exitCode(),3); QVERIFY(!QFile::exists(dir.filePath("preparation-was-run")));
+#endif
 }
 
 QTEST_APPLESS_MAIN(DiagnosticCommandBuilderTest)
