@@ -1300,6 +1300,7 @@ void MainWindow::applyFinishedModels(const QByteArray &output) {
       : QStringLiteral("Select a finished model…"));
   for (const auto &model : finishedModels_) {
     finishedModelCombo_->addItem(model.name + (model.variant == "tuned" ? " — Fine-tuned" : "") +
+        " — " + model.kind +
         (model.recoverySupported ? " — Recovery supported" : " — Current output only"));
     finishedModelCombo_->setItemData(finishedModelCombo_->count()-1,
         QString("Source: %1\nPublished artifact: %2").arg(model.directory, model.variant), Qt::ToolTipRole);
@@ -1319,6 +1320,8 @@ void MainWindow::syncFinishedModelSelection() {
     }
   }
   finishedModelCombo_->setCurrentIndex(index);
+  recoveryPanel_->setDeploymentRecoverySupport(index > 0
+      ? std::optional<bool>(finishedModels_.at(index - 1).recoverySupported) : std::nullopt);
 }
 
 void MainWindow::updateActionAvailability() {

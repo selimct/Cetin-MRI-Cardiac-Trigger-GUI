@@ -74,6 +74,13 @@ namespace thresholds
         m.manual = optionalNumber(m.values, "manual_threshold");
         m.fp = optionalNumber(m.values, "fp_threshold");
         m.der = optionalNumber(m.values, "der_threshold");
+        const auto recovery = m.values.value("recovery_head", "false");
+        if (recovery != "true" && recovery != "false" && recovery != "1" && recovery != "0")
+            fail("Malformed recovery_head");
+        m.recoveryHead = recovery == "true" || recovery == "1";
+        m.recoveryThreshold = optionalNumber(m.values, "recovery_threshold");
+        if (m.recoveryThreshold && (!m.recoveryHead || *m.recoveryThreshold <= 0))
+            fail("Recovery threshold requires two outputs and a finite value in (0, 1]");
         for (const auto &key : {"model_name", "model_variant"})
             if (m.values.value(key).isEmpty())
                 fail("Missing model identity");
@@ -81,8 +88,8 @@ namespace thresholds
         if (!m.values.value("engine_size_bytes").isEmpty())
         {
             bool ok = false;
-            m.values.value("engine_size_bytes").toULongLong(&ok);
-            if (!ok || !QRegularExpression("^[0-9]+$").match(m.values.value("engine_size_bytes")).hasMatch())
+            const auto size = m.values.value("engine_size_bytes").toULongLong(&ok);
+            if (!ok || size == 0 || !QRegularExpression("^[0-9]+$").match(m.values.value("engine_size_bytes")).hasMatch())
                 fail("Malformed engine size");
         }
         if (!m.values.value("engine_crc32").isEmpty() &&

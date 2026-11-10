@@ -13,6 +13,7 @@ struct FinishedModel {
   QString directory;
   QString variant;
   bool recoverySupported{false};
+  QString kind;
 };
 
 [[nodiscard]] QString finishedModelsCommand();

@@ -17,6 +17,7 @@ class RecoveryPanel final : public QWidget
   public:
     explicit RecoveryPanel(RecoveryController *controller, QWidget *parent = nullptr);
     bool forceRecoveryOff() const;
+    void setDeploymentRecoverySupport(std::optional<bool> supported);
     QWidget *takeDeploymentControls();
   signals:
     void deploymentPolicyChanged();
@@ -28,9 +29,10 @@ class RecoveryPanel final : public QWidget
     QCheckBox *enabled_;
     QLineEdit *custom_;
     QPushButton *apply_, *restore_, *refresh_;
-    QLabel *model_, *saved_, *active_, *status_, *summary_;
+    QLabel *model_, *calibrated_, *saved_, *active_, *status_, *summary_;
     QWidget *deploymentGroup_;
     QPlainTextEdit *information_;
     bool edited_{false}, supportForDraft_{false};
     QString draftIdentity_;
+    std::optional<bool> deploymentSupport_;
 };

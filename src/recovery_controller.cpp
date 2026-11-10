@@ -126,6 +126,9 @@ void RecoveryController::finished(bool success, const QString &error)
             {
                 const auto path =
                     source + (variant == "best" ? "/train_config.json" : "/tuning/tuned_config.json");
+                const auto engineValue = state_.manifest.values.value("engine_path", "model.engine");
+                const auto engine = QDir::cleanPath(engineValue.startsWith('/')
+                    ? engineValue : "deploy/model/" + engineValue);
                 // Read only beneath the configured remote checkout, including symlinks.
                 script += "source_path=$(readlink -f -- " + posixShellQuote(path) +
                           " || true)\n"
@@ -137,8 +140,8 @@ void RecoveryController::finished(bool success, const QString &error)
                           "source_after=$(sha256sum -- \"$source_path\" | cut -d ' ' -f1)\n"
                           "if test \"$source_before\" = \"$source_after\"; then printf "
                           "'SOURCE_REVISION=%s\\n' \"$source_after\"; else echo SOURCE_STALE=1; fi\n" +
-                          "if test -e deploy/model/model.engine && ! test \"$source_path\" -nt "
-                          "deploy/model/model.engine; then echo SOURCE_UNCHANGED=1; fi\nfi;; esac\n";
+                          "if test -e " + posixShellQuote(engine) + " && ! test \"$source_path\" -nt " +
+                          posixShellQuote(engine) + "; then echo SOURCE_UNCHANGED=1; fi\nfi;; esac\n";
             }
             script += apiRead();
             script += "test \"$(sha256sum -- " + posixShellQuote(manifestPath) +
@@ -184,6 +187,15 @@ void RecoveryController::finished(bool success, const QString &error)
                 state_.source = {};
                 state_.warning = "Calibration unconfirmed — source changed while reading or backend could "
                                  "not bind its revision; Refresh required";
+            }
+            if (!state_.api.isEmpty())
+            {
+                // The helper resolves the engine and service mount mappings. Its
+                // source checks must also approve restoration of our snapshot.
+                state_.sourceAvailable = state_.sourceAvailable &&
+                    state_.api.value("source_metadata_available").toBool();
+                state_.sourceUnchanged = state_.sourceUnchanged && state_.sourceAvailable &&
+                    state_.api.value("source_predates_engine").toBool();
             }
             if (!state_.liveSupported() && state_.warning.isEmpty())
                 state_.warning = state_.api.value("reason").toString(
@@ -245,6 +257,12 @@ void RecoveryController::apply(bool enabled, bool custom, const QString &value)
     }
 }
 void RecoveryController::restoreCalibrated() { mutate("--restore-calibrated"); }
+void RecoveryController::setEnabled(bool enabled)
+{
+    // Omit --threshold so the backend keeps the selected value, including when
+    // recovery is disabled or a service restart restored its startup policy.
+    mutate(enabled ? "--enable" : "--disable");
+}
 
 void RecoveryController::notePrimaryChange(const QJsonObject &identity)
 {

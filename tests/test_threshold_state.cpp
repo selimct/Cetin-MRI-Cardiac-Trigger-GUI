@@ -21,7 +21,8 @@ namespace
     {
         return "# calibrated model\nmodel_name=heart\nmodel_variant=best\nengine_size_bytes=123\nengine_crc32=abcdef01\n"
                "threshold=0.246\nfp_threshold=0.40812345678901234\nder_threshold=0.246\n"
-               "manual_threshold=  # operator selection\nother_setting=preserved # comment\n";
+               "manual_threshold=  # operator selection\nother_setting=preserved # comment\n"
+               "recovery_head=true\nrecovery_threshold=0.93\nholdoff_frames=20\n";
     }
     void write(const QString &path, const QByteArray &bytes)
     {
@@ -108,6 +109,34 @@ private slots:
         old.replace("engine_crc32=abcdef01\n", "");
         QVERIFY_EXCEPTION_THROWN(Manifest::parse(old).policy("0.2", true), std::runtime_error);
     }
+    void validatesBackendRecoveryRules()
+    {
+        const auto original = fixture();
+        for (const auto &value : {"0", "-0.1", "1.001", "NaN", "inf"})
+        {
+            auto bytes = original;
+            bytes.replace("recovery_threshold=0.93", QByteArray("recovery_threshold=") + value);
+            QVERIFY_EXCEPTION_THROWN(Manifest::parse(bytes), std::runtime_error);
+        }
+        auto single = original;
+        single.replace("recovery_head=true", "recovery_head=false");
+        QVERIFY_EXCEPTION_THROWN(Manifest::parse(single), std::runtime_error);
+        single.replace("recovery_threshold=0.93", "recovery_threshold=");
+        QVERIFY(!Manifest::parse(single).recoveryHead);
+        auto dual = original;
+        dual.replace("recovery_head=true", "recovery_head=1");
+        dual.replace("recovery_threshold=0.93", "recovery_threshold=1");
+        QVERIFY(Manifest::parse(dual).recoveryHead);
+        QCOMPARE(Manifest::parse(dual).recoveryThreshold.value(), 1.);
+        dual.replace("recovery_threshold=1", "recovery_threshold=");
+        QVERIFY(!Manifest::parse(dual).recoveryThreshold);
+        auto bad = original;
+        bad.replace("engine_size_bytes=123", "engine_size_bytes=0");
+        QVERIFY_EXCEPTION_THROWN(Manifest::parse(bad), std::runtime_error);
+        bad = original;
+        bad.replace("recovery_head=true", "recovery_head=yes");
+        QVERIFY_EXCEPTION_THROWN(Manifest::parse(bad), std::runtime_error);
+    }
     void readbackRequiresFreshAcceptedAndActive()
     {
         Readback r;
@@ -145,6 +174,8 @@ private slots:
         QFile::setPermissions(bin + "/systemctl", QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
         write(config, "manifest_path=model.conf\n");
         write(manifest, fixture());
+        write(dir.filePath("train_config.json"), "source-calibration-sentinel\n");
+        write(policy + ".recovery", "independent-recovery-override-sentinel\n");
         QFile::setPermissions(manifest, QFile::ReadOwner | QFile::WriteOwner | QFile::ReadGroup);
         auto run = [&](const Manifest &m, const QString &action, const QString &number, const QString &policyFile = QString())
         {
@@ -195,6 +226,9 @@ private slots:
         QVERIFY2(result.first == 0, result.second.constData());
         QVERIFY(!Manifest::parse(read(manifest)).manual);
         QVERIFY(result.second.indexOf("POLICY_SAVED") < result.second.indexOf("MANIFEST_SAVED"));
+        QCOMPARE(read(dir.filePath("train_config.json")), QByteArray("source-calibration-sentinel\n"));
+        QCOMPARE(read(policy + ".recovery"), QByteArray("independent-recovery-override-sentinel\n"));
+        QCOMPARE(read(manifest), fixture() + "# another client\n");
 #endif
     }
 };

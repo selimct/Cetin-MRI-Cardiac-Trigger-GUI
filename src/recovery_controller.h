@@ -17,6 +17,7 @@ class RecoveryController final : public QObject
     void discardReadback();
     void setExternalBusy(bool busy);
     void apply(bool enabled, bool custom, const QString &threshold);
+    void setEnabled(bool enabled);
     void restoreCalibrated();
     void notePrimaryChange(const QJsonObject &identity);
     bool blocking() const { return phase_ != Phase::idle; }

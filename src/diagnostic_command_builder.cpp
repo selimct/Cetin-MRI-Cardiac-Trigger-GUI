@@ -5,6 +5,7 @@
 #include "diagnostic_command_builder.h"
 
 #include "ssh_command_builder.h"
+#include "recovery_state.h"
 
 #include <QDir>
 #include <QJsonArray>
@@ -215,7 +216,8 @@ QString finishedModelsCommand() {
   // locally in Qt. Runtime-only deployments do not require Python.
   return QString::fromUtf8(R"SH(
 catalog_root=$(pwd -P)
-for directory in finished_models/*; do
+for family in finished_models/*; do
+ for directory in "$family" "$family/recovery" "$family/frozen_recovery" "$family/lopo_recovery"; do
   test -d "$directory" || continue
   resolved_directory=$(readlink -f -- "$directory") || continue
   case "$resolved_directory" in "$catalog_root"/*) ;; *) continue;; esac
@@ -234,6 +236,7 @@ for directory in finished_models/*; do
     base64 -w0 -- "$config"
     printf '\n'
   done
+ done
 done
 )SH");
 }
@@ -248,7 +251,8 @@ QList<FinishedModel> parseFinishedModels(const QByteArray &output) {
       const auto config = QJsonDocument::fromJson(QByteArray::fromBase64(parts[2])).object();
       FinishedModel model{config.value("modelname").toString(),
                           QString::fromUtf8(QByteArray::fromBase64(parts[0])),
-                          QString::fromLatin1(parts[1]), config.value("recovery_head").toBool(false)};
+                          QString::fromLatin1(parts[1]), config.value("recovery_head").toBool(false),
+                          recovery::modelKind(config)};
       DiagnosticRuntimeOptions options;
       options.modelName = model.name; options.modelDirectory = model.directory; options.variant = model.variant;
       if (model.directory.startsWith("finished_models/") && validateDiagnosticOptions(options).isEmpty()) result.append(model);
@@ -262,7 +266,8 @@ QList<FinishedModel> parseFinishedModels(const QByteArray &output) {
       const auto object = entry.toObject();
       FinishedModel model{object.value("name").toString(),
                           object.value("directory").toString(),
-                          object.value("variant").toString()};
+                          object.value("variant").toString(), object.value("recovery_head").toBool(false),
+                          recovery::modelKind(object)};
       DiagnosticRuntimeOptions options;
       options.modelName = model.name;
       options.modelDirectory = model.directory;

@@ -132,6 +132,21 @@ private slots:
         refresh(controller);
         QTRY_VERIFY_WITH_TIMEOUT(controller.ready(), 5000);
         QCOMPARE(*controller.readback().active, 0.246);
+        // Match native config booleans and its default when the key is omitted.
+        auto nativeConfig = readFile(config);
+        auto numericBoolean = nativeConfig;
+        numericBoolean.replace("early_emission=true", "early_emission=1");
+        writeFile(config, numericBoolean);
+        refresh(controller);
+        QVERIFY(controller.ready());
+        QVERIFY(controller.configuredEarly());
+        numericBoolean.replace("early_emission=1\n", "");
+        writeFile(config, numericBoolean);
+        refresh(controller);
+        QVERIFY(controller.ready());
+        QVERIFY(controller.configuredEarly());
+        writeFile(config, nativeConfig);
+        refresh(controller);
         input->setText("0.1"); // No write on editing.
         QCOMPARE(readFile(manifest), original);
         // Refreshing is a read-only operation and must never interrupt a draft.
@@ -182,6 +197,15 @@ private slots:
         event("runtime_status", {{"threshold", 0.246}, {"manual_override_configured", true}, {"configured_threshold", 0.246}, {"early_emission", true}}, "22222222222222222222222222222222");
         refresh(controller);
         QTest::qWait(200);
+        QVERIFY(controller.status() != "Applied");
+        event("runtime_status", {{"threshold", 0.246}, {"manual_override_configured", true},
+            {"configured_threshold", 0.246}, {"early_emission", true}, {"engine_crc32", "bad00000"}});
+        refresh(controller);
+        QVERIFY(controller.status() != "Applied");
+        event("runtime_status", {{"threshold", 0.246}, {"manual_override_configured", true},
+            {"configured_threshold", 0.246}, {"early_emission", true},
+            {"service_invocation_id", "22222222222222222222222222222222"}});
+        refresh(controller);
         QVERIFY(controller.status() != "Applied");
         status(0.246, true, 0.246, true);
         refresh(controller);
@@ -247,6 +271,7 @@ private slots:
         writeFile(dir.filePath("clock_override"), QByteArray::number(QDateTime::currentMSecsSinceEpoch() * 1000 + 200000000));
         refresh(reconnected);
         QTRY_VERIFY_WITH_TIMEOUT(reconnected.status().startsWith("Unconfirmed/stale"), 5000);
+        QVERIFY(!reconnected.readback().active); // Expired diagnostics cannot remain confirmed active.
         QVERIFY(!reconnected.blocking());
         QFile::remove(dir.filePath("clock_override"));
         // A service restart cancels a pending operation and discards active confirmation.

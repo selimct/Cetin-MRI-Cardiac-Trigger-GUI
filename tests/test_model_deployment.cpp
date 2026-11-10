@@ -60,19 +60,27 @@ private slots:
     QTemporaryDir outside;
     QVERIFY(outside.isValid());
     writeFile(outside.filePath("train_config.json"), "{\"modelname\":\"outside_model\"}");
-    writeFile(dir.filePath("finished_models/external/best.pth"), "weights");
-    QVERIFY(QFile::link(outside.filePath("train_config.json"), dir.filePath("finished_models/external/train_config.json")));
-    const QString source = "finished_models/folder with ' quote";
-    writeFile(dir.filePath(source + "/train_config.json"), "{\"modelname\":\"declared_name\"}");
+    writeFile(dir.filePath("finished_models/external/recovery/best.pth"), "weights");
+    QVERIFY(QFile::link(outside.filePath("train_config.json"), dir.filePath("finished_models/external/recovery/train_config.json")));
+    const QString source = "finished_models/folder with ' quote/recovery";
+    writeFile(dir.filePath(source + "/train_config.json"), "{\"modelname\":\"declared_name\",\"recovery_head\":true,\"recovery_only\":false}");
     writeFile(dir.filePath(source + "/best.pth"), "saved weights");
-    writeFile(dir.filePath(source + "/tuning/tuned_config.json"), "{\"modelname\":\"declared_name\"}");
+    writeFile(dir.filePath(source + "/tuning/tuned_config.json"), "{\"modelname\":\"declared_name\",\"recovery_head\":true,\"recovery_only\":false}");
     writeFile(dir.filePath(source + "/best_tuned.pth"), "saved tuned weights");
     // Published recovery workflows both publish best; intermediate tuning/fold
     // checkpoints are never catalogued, and names do not imply capability.
-    writeFile(dir.filePath("finished_models/heart_recovery/train_config.json"), "{\"modelname\":\"heart_recovery\",\"recovery_head\":true}");
-    writeFile(dir.filePath("finished_models/heart_recovery/best.pth"), "published");
-    writeFile(dir.filePath("finished_models/heart_lopo_recovery/train_config.json"), "{\"modelname\":\"heart_lopo_recovery\",\"recovery_head\":true}");
-    writeFile(dir.filePath("finished_models/heart_lopo_recovery/best.pth"), "published");
+    writeFile(dir.filePath("finished_models/heart/recovery/train_config.json"), "{\"modelname\":\"heart_recovery\",\"recovery_head\":true,\"recovery_only\":false}");
+    writeFile(dir.filePath("finished_models/heart/recovery/best.pth"), "published");
+    writeFile(dir.filePath("finished_models/heart/lopo_recovery/train_config.json"), "{\"modelname\":\"heart_lopo_recovery\",\"recovery_head\":true,\"recovery_only\":true,\"cv_method\":\"nested_recovery_lopo\"}");
+    writeFile(dir.filePath("finished_models/heart/lopo_recovery/best.pth"), "published");
+    writeFile(dir.filePath("finished_models/heart/frozen_recovery/train_config.json"), "{\"modelname\":\"heart_frozen_recovery\",\"recovery_head\":true,\"recovery_only\":true}");
+    writeFile(dir.filePath("finished_models/heart/frozen_recovery/best.pth"), "published");
+    writeFile(dir.filePath("finished_models/heart_legacy_recovery/train_config.json"), "{\"modelname\":\"heart_legacy_recovery\",\"recovery_head\":true}");
+    writeFile(dir.filePath("finished_models/heart_legacy_recovery/best.pth"), "published");
+    writeFile(dir.filePath("finished_models/z_normal/train_config.json"), "{\"modelname\":\"misleading_recovery\"}");
+    writeFile(dir.filePath("finished_models/z_normal/best.pth"), "published");
+    writeFile(dir.filePath("finished_models/heart/internal/outer/train_config.json"), "{\"modelname\":\"internal\"}");
+    writeFile(dir.filePath("finished_models/heart/internal/outer/best.pth"), "intermediate");
     writeFile(dir.filePath("models/heart_lopo_recovery_cv/nested_recovery_lopo/best_tuned.pth"), "intermediate");
     writeFile(dir.filePath("finished_models/incomplete_recovery/train_config.json"), "{\"modelname\":\"incomplete_recovery\"}");
     writeFile(dir.filePath("finished_models/broken/train_config.json"), "not json");
@@ -109,19 +117,28 @@ printf 'model_name=%s\nsource_model_dir=%s\nmodel_variant=%s\n' "$1" "$3" "$5" >
     QVERIFY(recoveryPolicy);
     QVERIFY(readFile(dir.filePath("ssh.calls")).isEmpty());
     refresh->click();
-    QTRY_COMPARE_WITH_TIMEOUT(models->count(), 5, 5000); // Placeholder + original best/tuned + two published recovery best artifacts.
+    QTRY_COMPARE_WITH_TIMEOUT(models->count(), 8, 5000); // Placeholder, best/tuned, three nested recovery kinds, legacy flat recovery, normal.
     QTRY_VERIFY_WITH_TIMEOUT(refresh->isEnabled(), 5000);
-    for (int index = 3; index < 5; ++index) {
+    for (int index = 3; index < 7; ++index) {
       QVERIFY(models->itemText(index).contains("_recovery"));
       QVERIFY(models->itemText(index).contains("Recovery supported"));
       QVERIFY(!models->itemText(index).contains("Fine-tuned"));
     }
+    QVERIFY(models->itemText(3).contains("Joint-recovery"));
+    QVERIFY(models->itemText(4).contains("Frozen-recovery"));
+    QVERIFY(models->itemText(5).contains("LOPO-recovery"));
+    QVERIFY(models->itemText(6).contains("training mode unknown"));
+    QVERIFY(models->itemText(7).contains("Normal (single output)"));
     const auto beforeSelection = readFile(dir.filePath("ssh.calls"));
+    models->setCurrentIndex(7);
+    QVERIFY(QMetaObject::invokeMethod(models, "activated", Q_ARG(int, 7)));
+    QVERIFY(!recoveryPolicy->isEnabled());
     models->setCurrentIndex(2);
     QVERIFY(QMetaObject::invokeMethod(models, "activated", Q_ARG(int, 2)));
     QCOMPARE(name->text(), QString("declared_name"));
     QCOMPARE(directory->text(), source);
     QCOMPARE(variant->currentText(), QString("tuned"));
+    QVERIFY(recoveryPolicy->isEnabled());
     QTest::qWait(200);
     QCOMPARE(readFile(dir.filePath("ssh.calls")), beforeSelection);
     QVERIFY(!reexport->isEnabled());

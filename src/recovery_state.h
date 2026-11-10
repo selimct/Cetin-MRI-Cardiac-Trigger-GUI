@@ -12,6 +12,7 @@ namespace recovery
 // capability and transport capability are deliberately independent.
 inline constexpr auto schema = "dkfz-live-recovery-control-v1";
 double threshold(const QString &text);
+QString modelKind(const QJsonObject &source);
 struct State
 {
     thresholds::Manifest manifest;

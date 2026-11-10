@@ -290,10 +290,10 @@ void ThresholdController::finished(bool success, const QString &message)
                 error("Runtime config has no manifest_path");
             manifestPath_ = hostPath(config.value("manifest_path"));
             policyPath_ = config.value("threshold_override_path").isEmpty() ? QString() : hostPath(config.value("threshold_override_path"));
-            const auto early = config.value("early_emission", "false");
-            if (early != "true" && early != "false")
+            const auto early = config.value("early_emission", "true");
+            if (early != "true" && early != "false" && early != "1" && early != "0")
                 error("Malformed configured early_emission");
-            configuredEarly_ = early == "true";
+            configuredEarly_ = early == "true" || early == "1";
             bool a = false, b = false;
             const auto running = config.value("status_interval_ms", "5000").toLongLong(&a);
             const auto paused = config.value("paused_status_interval_ms", "60000").toLongLong(&b);
@@ -370,6 +370,7 @@ void ThresholdController::finished(bool success, const QString &message)
             if (fields.contains("JOURNAL_ERROR"))
             {
                 cursor_.clear();
+                readback_ = {};
                 status_ = "Unconfirmed/stale — status reporting unavailable (journal read failed)";
             }
             else
@@ -407,6 +408,16 @@ void ThresholdController::consumeJournal(const QByteArray &journal)
         const auto event = QJsonDocument::fromJson(entry.value("MESSAGE").toString().toUtf8()).object();
         if (event.value("schema") != "dkfz-live-diagnostic-v1")
             continue;
+        // New native diagnostics carry the deployment identity. Refuse a
+        // different engine even if it shares this service invocation.
+        bool identityMatches = true;
+        const auto identity = manifest_.identity();
+        for (auto it = identity.begin(); it != identity.end(); ++it)
+            if (event.contains(it.key()) && event.value(it.key()) != it.value())
+                identityMatches = false;
+        if (!identityMatches || (event.contains("service_invocation_id") &&
+                                event.value("service_invocation_id") != invocation_))
+            continue;
         const auto time = entry.value("__REALTIME_TIMESTAMP").toString().toLongLong();
         if (time <= identitySince_ || time > remoteNow_ || remoteNow_ - time > freshnessUs_)
             continue;
@@ -434,8 +445,9 @@ void ThresholdController::reconcile()
         else
             status_ = readback_.paused ? "Waiting for input — saved; previous confirmed active policy retained" : "Saved/Pending";
     }
-    else if (readback_.activeAt && remoteNow_ - readback_.activeAt > freshnessUs_)
+    if (readback_.activeAt && remoteNow_ - readback_.activeAt > freshnessUs_)
     {
+        readback_ = {};
         status_ = "Unconfirmed/stale — native status has expired";
     }
 }
@@ -509,6 +521,7 @@ void ThresholdController::complete(const QString &result)
 void ThresholdController::fail(const QString &message)
 {
     valid_ = false;
+    readback_ = {};
     if (pending_ && phase_ != Phase::write)
         complete("Unconfirmed/stale — " + message);
     else

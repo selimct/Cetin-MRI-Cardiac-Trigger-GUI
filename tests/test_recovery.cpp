@@ -25,7 +25,7 @@ QByteArray manifest(bool dual = true)
 {
     return "model_name=heart\nmodel_variant=best\nengine_size_bytes=123\nengine_crc32=abcdef01\nthreshold=0."
            "3\nmanual_threshold=\n"
-           "source_model_dir=finished_models/heart\nframe_size_raw=5\nraw_hz=500\nrecovery_head=" +
+           "source_model_dir=finished_models/heart/recovery\nengine_path=custom.engine\nframe_size_raw=5\nraw_hz=500\nrecovery_head=" +
            QByteArray(dual ? "true" : "false") + "\nrecovery_threshold=\n";
 }
 QJsonObject source()
@@ -78,6 +78,8 @@ QJsonObject api(const recovery::State &s, bool enabled = false, QJsonValue activ
             {"revision", "revision-1"},
             {"service_invocation_id", invocation},
             {"source_revision", s.sourceRevision},
+            {"source_metadata_available", true},
+            {"source_predates_engine", true},
             {"selected_threshold", 0.97},
             {"requested",
              QJsonObject{{"enabled", enabled}, {"threshold", enabled ? QJsonValue(0.97) : QJsonValue()}}},
@@ -139,6 +141,20 @@ class RecoveryTest final : public QObject
         s.manifest = thresholds::Manifest::parse(manifest(false));
         QVERIFY(s.information().contains("Recovery unavailable: single-output model"));
     }
+    void modelKindsComeFromMetadata()
+    {
+        QCOMPARE(recovery::modelKind({{"modelname", "looks_like_lopo_recovery"}}),
+                 QString("Normal (single output)"));
+        QJsonObject model{{"recovery_head", true}, {"recovery_only", false}};
+        QCOMPARE(recovery::modelKind(model), QString("Joint-recovery"));
+        model["recovery_only"] = true;
+        QCOMPARE(recovery::modelKind(model), QString("Frozen-recovery"));
+        model["cv_method"] = "nested_recovery_lopo";
+        QCOMPARE(recovery::modelKind(model), QString("LOPO-recovery"));
+        model.remove("cv_method");
+        model.remove("recovery_only");
+        QCOMPARE(recovery::modelKind(model), QString("Recovery (training mode unknown)"));
+    }
     void thresholdValidationAndApiIdentity()
     {
         QCOMPARE(recovery::threshold("1"), 1.);
@@ -197,6 +213,7 @@ class RecoveryTest final : public QObject
             QJsonObject{{"selected_threshold", "0.9"}},
             QJsonObject{{"requested", QJsonObject{{"enabled", true}, {"threshold", QJsonValue()}}}},
             QJsonObject{{"requested", QJsonObject{{"enabled", false}, {"threshold", 0.9}}}},
+            QJsonObject{{"requested", QJsonObject{{"enabled", true}, {"threshold", 0.91}}}},
             QJsonObject{{"active", QJsonValue()}},
             QJsonObject{{"confirmation", QJsonValue()}},
             QJsonObject{{"confirmation", "confirmed"}, {"live_api_supported", false}}};
@@ -212,10 +229,30 @@ class RecoveryTest final : public QObject
             QVERIFY(state.active().startsWith("Unknown"));
         }
     }
+    void restartKeepsSelectionSeparateFromStartupAndActive()
+    {
+        recovery::State state;
+        auto deployed = manifest();
+        deployed.replace("recovery_threshold=\n", "recovery_threshold=0.92\n");
+        state.manifest = thresholds::Manifest::parse(deployed);
+        state.source = source();
+        state.sourceAvailable = state.sourceUnchanged = true;
+        auto response = api(state, true);
+        response["requested"] = QJsonObject{{"enabled", true}, {"threshold", 0.92}};
+        response["request_id"] = "0";
+        response["active"] = QJsonObject{{"enabled", true}, {"threshold", 0.92}, {"request_id", "0"}};
+        response["confirmation"] = "confirmed";
+        QVERIFY(state.acceptApi(response));
+        QCOMPARE(state.calibrated().value(), 0.92);
+        QVERIFY(state.requested().contains("Persistent startup policy: enabled; threshold 0.92"));
+        QVERIFY(state.requested().contains("Selected recovery threshold (retained across restarts): 0.97"));
+        QVERIFY(state.requested().contains("no invocation override"));
+        QVERIFY(state.active().contains("effective threshold 0.92; confirmed"));
+    }
     void preparationAndTelemetrySemantics()
     {
         DiagnosticRuntimeOptions options{
-            .modelName = "heart", .modelDirectory = "finished_models/heart", .forceRecoveryOff = true};
+            .modelName = "heart", .modelDirectory = "finished_models/heart/recovery", .forceRecoveryOff = true};
         QVERIFY(prepareModelCommand(options).endsWith("--jetson-only --no-recovery"));
         options.preparationMode = "complete";
         QVERIFY(prepareModelCommand(options).endsWith("--variant 'best' --no-recovery"));
@@ -270,8 +307,8 @@ class RecoveryTest final : public QObject
         // Fail if runtime discovery or metadata accidentally acquires a Python dependency.
         write(bin + "/python3", "#!/bin/bash\necho 'Python unavailable on target' >&2\nexit 127\n", true);
         write(dir.filePath("deploy/model/model.conf"), manifest());
-        write(dir.filePath("finished_models/heart/train_config.json"), QJsonDocument(source()).toJson());
-        write(dir.filePath("deploy/model/model.engine"), "engine");
+        write(dir.filePath("finished_models/heart/recovery/train_config.json"), QJsonDocument(source()).toJson());
+        write(dir.filePath("deploy/model/custom.engine"), "engine");
         RecoveryController c;
         c.configure({.host = "fake", .remoteDirectory = dir.path()}, {});
         RecoveryPanel p(&c);
@@ -286,6 +323,7 @@ class RecoveryTest final : public QObject
         QVERIFY(!c.ready());
         QVERIFY(c.status().contains("API v1 is absent"));
         QVERIFY(c.state().sourceAvailable);
+        QVERIFY(c.state().sourceUnchanged); // engine_path is relative to the manifest, not the checkout.
         QVERIFY(c.state().information().contains("10 ms"));
         auto *deployment = p.findChild<QComboBox *>("recoveryDeploymentPolicy");
         const auto calls = read(dir.filePath("ssh.calls"));
@@ -313,9 +351,21 @@ else printf '%s\n' "$@" > mutation.args; cat mutation.json; fi
         auto *custom = p.findChild<QLineEdit *>("customRecoveryThreshold");
         auto *mode = p.findChild<QComboBox *>("recoveryThresholdMode");
         auto *enabled = p.findChild<QCheckBox *>("recoveryEnabled");
-        QCOMPARE(mode->currentIndex(), 1);
+        QCOMPARE(mode->currentIndex(), 2); // Enable/disable preserves the backend's last selection.
         QCOMPARE(custom->text(), QString::number(0.97, 'g', 17));
         QVERIFY(!enabled->isChecked());
+        enabled->setChecked(true);
+        apply->click();
+        QTRY_VERIFY_WITH_TIMEOUT(!c.blocking(), 5000);
+        QVERIFY(read(dir.filePath("mutation.args")).startsWith("--enable\n--json\n"));
+        QVERIFY(!read(dir.filePath("mutation.args")).contains("--threshold"));
+        enabled->setChecked(false);
+        apply->click();
+        QTRY_VERIFY_WITH_TIMEOUT(!c.blocking(), 5000);
+        QVERIFY(read(dir.filePath("mutation.args")).startsWith("--disable\n--json\n"));
+        QVERIFY(!read(dir.filePath("mutation.args")).contains("--threshold"));
+        QFile::remove(dir.filePath("mutation.args"));
+        mode->setCurrentIndex(1);
         custom->setText("0");
         apply->click();
         QVERIFY(!QFile::exists(dir.filePath("mutation.args")));
@@ -345,6 +395,21 @@ else printf '%s\n' "$@" > mutation.args; cat mutation.json; fi
         QVERIFY(c.status().contains("paused"));
         QVERIFY(c.state().active().contains("disabled"));
         QVERIFY(c.state().requested().contains("0.97"));
+        // Restoration honors the backend's source validation as well as our
+        // byte-stable read, and does not confuse current-only startup with null calibration.
+        response["source_predates_engine"] = false;
+        write(dir.filePath("api.json"), QJsonDocument(response).toJson());
+        refresh();
+        QVERIFY(!p.findChild<QPushButton *>("restoreRecovery")->isEnabled());
+        QVERIFY(c.state().sourceAvailable);
+        response["source_predates_engine"] = true;
+        write(dir.filePath("api.json"), QJsonDocument(response).toJson());
+        refresh();
+        QVERIFY(p.findChild<QPushButton *>("restoreRecovery")->isEnabled());
+        p.findChild<QPushButton *>("restoreRecovery")->click();
+        QTRY_VERIFY_WITH_TIMEOUT(!c.blocking(), 5000);
+        QVERIFY(read(dir.filePath("mutation.args")).startsWith("--restore-calibrated\n--json\n"));
+        QCOMPARE(read(dir.filePath("deploy/model/model.conf")), original);
         const auto idle = read(dir.filePath("ssh.calls"));
         QTest::qWait(120);
         QCOMPARE(read(dir.filePath("ssh.calls")), idle);
@@ -388,9 +453,22 @@ else printf '%s\n' "$@" > mutation.args; cat mutation.json; fi
         // Source JSON from another model cannot be attached to this deployment.
         auto wrong = source();
         wrong["modelname"] = "another";
-        write(dir.filePath("finished_models/heart/train_config.json"), QJsonDocument(wrong).toJson());
+        write(dir.filePath("finished_models/heart/recovery/train_config.json"), QJsonDocument(wrong).toJson());
         refresh();
         QVERIFY(!c.state().sourceAvailable);
+        // A known single-output selection disables startup and live recovery
+        // controls without changing the model or issuing an SSH mutation.
+        write(dir.filePath("deploy/model/model.conf"), manifest(false));
+        QFile::remove(dir.filePath("build_native/inference/native_live_recovery_control"));
+        refresh();
+        QVERIFY(!c.state().supportsRecovery());
+        p.setDeploymentRecoverySupport(false);
+        QVERIFY(!deployment->isEnabled());
+        QVERIFY(!p.forceRecoveryOff());
+        QVERIFY(!apply->isEnabled());
+        QVERIFY(!enabled->isEnabled());
+        QVERIFY(!mode->isEnabled());
+        QVERIFY(!custom->isEnabled());
 #endif
     }
 };

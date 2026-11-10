@@ -33,7 +33,17 @@ double threshold(const QString &text)
         throw std::runtime_error("Recovery threshold must be finite and in (0, 1]");
     return value;
 }
-bool State::supportsRecovery() const { return manifest.values.value("recovery_head", "false") == "true"; }
+QString modelKind(const QJsonObject &source)
+{
+    if (!source.value("recovery_head").toBool(false))
+        return "Normal (single output)";
+    if (source.value("cv_method") == "nested_recovery_lopo")
+        return "LOPO-recovery";
+    if (!source.value("recovery_only").isBool())
+        return "Recovery (training mode unknown)";
+    return source.value("recovery_only").toBool() ? "Frozen-recovery" : "Joint-recovery";
+}
+bool State::supportsRecovery() const { return manifest.recoveryHead; }
 bool State::liveSupported() const
 {
     return api.value("schema") == schema && api.value("api_version").toInt() == 1 &&
@@ -93,6 +103,12 @@ bool State::acceptApi(const QJsonObject &response)
         !validPolicy(response.value("requested").toObject()) || !response.value("active").isObject())
         return reject("Unconfirmed — malformed recovery request or service identity");
     const auto active = response.value("active").toObject();
+    const auto requested = response.value("requested").toObject();
+    // On restart, request 0 uses the manifest startup policy while the helper
+    // retains a previous invocation's numeric selection for a future request.
+    if (response.value("request_id") != "0" && requested.value("enabled").toBool() &&
+        selected != requested.value("threshold"))
+        return reject("Unconfirmed — selected/requested recovery threshold mismatch");
     if (!active.isEmpty() && (!validPolicy(active) || active.value("request_id").toString().isEmpty()))
         return reject("Unconfirmed — malformed active recovery readback");
     if (response.value("confirmation") == "confirmed")
@@ -111,19 +127,23 @@ bool State::acceptApi(const QJsonObject &response)
 
 QString State::requested() const
 {
-    QString saved = "Deployment saved policy: ";
+    QString saved = "Persistent startup policy: ";
     const auto value = manifest.values.value("recovery_threshold");
     saved += supportsRecovery() && !value.isEmpty() ? "enabled; threshold " + value : "disabled";
     if (api.isEmpty())
         return saved + "; live request unavailable";
-    return saved + "\nSaved selected threshold: " + number(api.value("selected_threshold")) + "; requested " +
+    return saved + "\nSelected recovery threshold (retained across restarts): " + number(api.value("selected_threshold")) +
+           (api.value("request_id") == "0" ? "\nLive requested startup policy (no invocation override): "
+                                          : "\nLive override for this service invocation: ") +
            policy(api.value("requested").toObject());
 }
 QString State::active() const
 {
     if (api.isEmpty())
         return "Unknown / unconfirmed — deployed manifest and source JSON are saved settings";
-    return policy(api.value("active").toObject()) + "; " + api.value("confirmation").toString("unconfirmed") +
+    const auto active = api.value("active").toObject();
+    return policy(active) + "; " + api.value("confirmation").toString("unconfirmed") +
+           "; active request " + active.value("request_id").toString("unavailable") +
            "; request " + api.value("request_id").toString("unavailable");
 }
 QString State::auditPolicy() const
@@ -198,6 +218,7 @@ QString State::information() const
     lines << (sourceUnchanged ? "Saved source snapshot from the deployed source directory; byte identity at "
                                 "deployment is unverified (not runtime confirmation)"
                               : "Source metadata unconfirmed: it may have changed since deployment");
+    lines << "Model kind: " + modelKind(source);
     if (supportsRecovery())
     {
         if (source.value("recovery_threshold").isNull())

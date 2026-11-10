@@ -24,6 +24,8 @@ namespace thresholds
         QMap<QString, QString> values;
         double automatic{};
         std::optional<double> manual, fp, der;
+        bool recoveryHead{false};
+        std::optional<double> recoveryThreshold;
         static Manifest parse(const QByteArray &text);
         QJsonObject identity() const;
         bool fingerprinted() const;

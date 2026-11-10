@@ -22,13 +22,13 @@ For normal use:
 
 1. Open **Connection**, enter the SSH settings, and press **Check** or **Enter**.
 2. Select a published model from **Finished models**.
-3. Choose **Startup recovery**: **Use saved recovery settings**, or
+3. Choose **Persistent startup recovery**: **Use saved recovery settings**, or
    **Recovery off — current output only**.
 4. Review the existing hardware checkbox and click **Deploy and start**. This
    sends the existing stop → prepare → validate → start commands over SSH.
 5. Press **Check**, **Refresh**, or **Enter** when you want updated information.
 
-To turn recovery off and back on for the **same two-output model**, keep that
+To persist recovery off and back on for the **same two-output model**, keep that
 model selected, change only Startup recovery, and deploy/start it again. Off
 forwards `--no-recovery` to preparation. Saved settings omit that flag and restore
 the source policy. Both keep `recovery_head=true`; no retraining or new checkpoint
@@ -36,6 +36,11 @@ is needed. Restoring saved settings enables recovery only if the source policy
 enables it and has a valid threshold; a null threshold or disabled source policy
 stays off. This works without a live recovery switching API, provided the runtime
 already supports two-output recovery models.
+
+For a live change on a service that supports the existing native recovery API,
+use **Detector controls → Live recovery override**. Leave **Keep selected
+threshold** selected, edit the recovery checkbox, and click **Apply recovery**.
+This override expires with the service invocation; see the persistence table below.
 
 Selecting a model or editing a draft sends no SSH commands. Apply, preparation,
 service start and restart do not schedule status refreshes. Check and Enter read
@@ -131,7 +136,7 @@ Operates the current checkout beneath the selected remote project root. It can:
 - prepare a selected best/tuned model on the Jetson in either of two modes:
   TensorRT from an existing ONNX (`--jetson-only`), or the complete
   PTH-to-ONNX-to-TensorRT pipeline;
-- select an exact source directory such as `finished_models/target_r` or
+- select an exact source directory such as `finished_models/target_r`, `finished_models/target_r/recovery` or
   `models_noCV/target_r` and pass it through `--model-dir`;
 - atomically activate the resulting engine and manifest as
   `deploy/model/model.engine` and `deploy/model/model.conf`;
@@ -220,6 +225,29 @@ the desktop needs no local live-stack checkout. Discovery and read-only
 recovery metadata use remote shell/coreutils and local Qt JSON parsing, so a
 runtime-only target needs no Python.
 
+The finished-model selector labels **Normal (single output)**, **Joint-recovery**,
+**Frozen-recovery**, and **LOPO-recovery** from saved `recovery_head`,
+`recovery_only`, and `cv_method` metadata. Missing training provenance is shown
+as unknown. The directory or model name alone never establishes capability or
+training mode. Known single-output selections disable startup recovery controls;
+single-output deployments disable all live recovery edits.
+
+| Control | What is saved | What applies after a service restart |
+| --- | --- | --- |
+| Primary custom/preset | Only `manual_threshold` in the deployed manifest; the runtime reloads it | The saved primary selection |
+| Restore calibrated primary | Clears `manual_threshold`, first restoring the fallback to the manifest's calibrated automatic threshold | Calibrated automatic primary threshold |
+| Early emission | Separate primary fallback/timing override, preserving the primary selection | Saved fallback/timing policy |
+| Startup recovery | Local draft until preparation; forwards `--no-recovery` or uses source defaults | The prepared manifest's recovery policy |
+| Live recovery Apply/Restore | Native recovery override bound to the engine and service invocation | Manifest recovery policy; the last selected threshold remains available for an explicit new request |
+
+Primary thresholds accept finite values in `[0, 1]`; recovery thresholds accept
+finite values in `(0, 1]`. An empty/null recovery threshold means disabled, and
+a single-output manifest cannot contain a recovery threshold. The GUI validates
+these rules before submitting values. Primary restore leaves the selected
+early-emission policy intact. Neither head's controls rewrite source training
+JSON, calibrated thresholds, preprocessing, holdoff, or the other head's policy.
+Saved files and successful requests are never treated as active confirmation.
+
 Choose **Use saved recovery settings** or **Recovery off — current output only** in the recovery deployment section. This is a preparation
 setting beside model selection: both preparation modes forward `--no-recovery`
 when selected. Restoring the saved deployment selection only edits that draft.
@@ -228,7 +256,7 @@ respects disabled source defaults and null calibration; there is no preparation
 flag to force recovery on, and no training JSON is rewritten. Preparation/export
 itself retains the backend's existing environment requirements described above.
 
-Existing backends support deployment control only. **Refresh recovery state**
+Targets without the native recovery API support deployment control only. **Refresh recovery state**
 checks the deployed manifest/source and the actual remote native API version.
 When already provided by the remote stack, live **Apply recovery** and
 **Restore calibrated recovery** use
@@ -238,7 +266,9 @@ invocation-bound diagnostics. The GUI never installs this interface or its runti
 A similarly named script does not establish support. Direct processes are unsupported by v1;
 service journal status cannot confirm them.
 
-On supported services, select calibrated recovery or explicitly choose
+On supported services, **Keep selected threshold** is the initial live selection:
+enable/disable sends only `--enable`/`--disable`, preserving the backend's last
+selected threshold rather than substituting calibration. Select calibrated recovery or explicitly choose
 **Advanced: custom threshold**, enter a finite number in `(0, 1]`, edit the
 checkbox and click Apply. Disabling retains the saved selected threshold;
 null active threshold means off. A null calibrated threshold is shown as
@@ -262,7 +292,8 @@ newly selected GUI model. Best uses `train_config.json`; tuned uses
 runtime confirmation. Its original byte identity is unverified because existing
 manifests do not pin a source-config hash. Missing, mismatched, changed-during-read
 or newer source files are unavailable/unconfirmed; restoration refuses an
-unusable source. Published `*_recovery` and `*_lopo_recovery` artifacts are both
+unusable source. Published recovery artifacts under `finished_models/MODEL/recovery/`,
+`frozen_recovery/` and `lopo_recovery/` (plus legacy flat copies) are
 discovered as best from `best.pth` + `train_config.json`; intermediate tuning/fold
 artifacts outside finished_models are excluded. Capability/provenance never
 comes from a name suffix.
@@ -368,6 +399,13 @@ ctest --test-dir build --output-on-failure
 
 Qt 6.5 or newer, CMake 3.21 or newer, a C++20 compiler, and OpenSSH are
 required. The build directory remains local and is ignored by Git.
+
+The focused `recovery`, `threshold-state`, `threshold-controller`, and
+`model-deployment` tests use temporary files and a fake SSH/native-control host.
+They cover all four model kinds, independent policy writes and calibration
+preservation, threshold bounds, enable/disable without threshold replacement,
+restore eligibility, restart selection versus startup policy, and rejection of
+stale or mismatched readback. Tests need no Jetson, UART, GPIO, or running service.
 
 ## Local connection file
 

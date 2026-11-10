@@ -20,7 +20,7 @@ RecoveryPanel::RecoveryPanel(RecoveryController *controller, QWidget *parent)
     : QWidget(parent), controller_(controller)
 {
     auto *layout = new QVBoxLayout(this);
-    auto *deploymentGroup = new QGroupBox("Startup recovery", this);
+    auto *deploymentGroup = new QGroupBox("Persistent startup recovery (next preparation)", this);
     deploymentGroup_ = deploymentGroup;
     auto *deploymentLayout = new QVBoxLayout(deploymentGroup);
     deployment_ = new QComboBox(deploymentGroup);
@@ -43,7 +43,7 @@ RecoveryPanel::RecoveryPanel(RecoveryController *controller, QWidget *parent)
     explanation->setWordWrap(true);
     deploymentLayout->addWidget(explanation);
     layout->addWidget(deploymentGroup);
-    auto *live = new QGroupBox("Recovery runtime policy", this);
+    auto *live = new QGroupBox("Live recovery override (this service invocation)", this);
     auto *form = new QFormLayout(live);
     summary_ = new QLabel(live);
     summary_->setWordWrap(true);
@@ -67,9 +67,12 @@ RecoveryPanel::RecoveryPanel(RecoveryController *controller, QWidget *parent)
     status_ = label();
     status_->setObjectName("recoveryStatus");
     active_->setObjectName("activeRecovery");
+    calibrated_ = label();
+    calibrated_->setObjectName("calibratedRecovery");
+    form->addRow("Calibrated recovery", calibrated_);
     detailForm->addRow("Deployed model", model_);
-    detailForm->addRow("Saved / requested", saved_);
-    detailForm->addRow("Confirmed active", active_);
+    form->addRow("Startup / selected / requested", saved_);
+    form->addRow("Native active readback", active_);
     detailForm->addRow("Status", status_);
     enabled_ = new QCheckBox("Recovery enabled (edited; press Apply)", live);
     enabled_->setObjectName("recoveryEnabled");
@@ -78,6 +81,7 @@ RecoveryPanel::RecoveryPanel(RecoveryController *controller, QWidget *parent)
     thresholdMode_->setObjectName("recoveryThresholdMode");
     thresholdMode_->addItem("Use calibrated threshold");
     thresholdMode_->addItem("Advanced: custom threshold");
+    thresholdMode_->addItem("Keep selected threshold");
     custom_ = new QLineEdit(live);
     custom_->setObjectName("customRecoveryThreshold");
     custom_->setPlaceholderText("Explicit finite threshold in (0, 1]");
@@ -94,6 +98,11 @@ RecoveryPanel::RecoveryPanel(RecoveryController *controller, QWidget *parent)
     buttons->addWidget(restore_);
     buttons->addWidget(refresh_);
     form->addRow(buttons);
+    auto *scope = new QLabel("Apply and Restore change the live override for this service invocation. "
+        "After restart, the persistent startup policy applies. The last selected threshold is retained. "
+        "Refresh to confirm native application.", live);
+    scope->setWordWrap(true);
+    form->addRow(scope);
     information_ = new QPlainTextEdit(live);
     information_->setObjectName("recoveryInformation");
     information_->setReadOnly(true);
@@ -122,7 +131,12 @@ RecoveryPanel::RecoveryPanel(RecoveryController *controller, QWidget *parent)
     connect(restore_, &QPushButton::clicked, controller_, &RecoveryController::restoreCalibrated);
     connect(
         apply_, &QPushButton::clicked, this, [this]
-        { controller_->apply(enabled_->isChecked(), thresholdMode_->currentIndex() == 1, custom_->text()); });
+        {
+            if (thresholdMode_->currentIndex() == 2)
+                controller_->setEnabled(enabled_->isChecked());
+            else
+                controller_->apply(enabled_->isChecked(), thresholdMode_->currentIndex() == 1, custom_->text());
+        });
     connect(controller_, &RecoveryController::changed, this, &RecoveryPanel::update);
     connect(controller_, &RecoveryController::invalidated, this,
             [this]
@@ -133,7 +147,15 @@ RecoveryPanel::RecoveryPanel(RecoveryController *controller, QWidget *parent)
             });
     update();
 }
-bool RecoveryPanel::forceRecoveryOff() const { return deployment_->currentData().toBool(); }
+bool RecoveryPanel::forceRecoveryOff() const
+{
+    return deploymentSupport_ != false && deployment_->currentData().toBool();
+}
+void RecoveryPanel::setDeploymentRecoverySupport(std::optional<bool> supported)
+{
+    deploymentSupport_ = supported;
+    update();
+}
 QWidget *RecoveryPanel::takeDeploymentControls()
 {
     layout()->removeWidget(deploymentGroup_);
@@ -185,6 +207,14 @@ void RecoveryPanel::update()
         model_->setText(model_->text() + "; engine CRC32 " + s.manifest.values.value("engine_crc32") +
                         "; bytes " + s.manifest.values.value("engine_size_bytes"));
     saved_->setText(s.requested());
+    calibrated_->setText(
+        !s.manifest.contents.isEmpty() && !s.supportsRecovery() ? "Not applicable: single-output model"
+        : !s.sourceAvailable ? "Unavailable / unconfirmed"
+        : s.calibrated() ? QString::number(*s.calibrated(), 'g', 12) +
+            (s.sourceEnabled() ? "; source default enabled" : "; source default disabled") +
+            (s.sourceUnchanged ? "" : "; source changed since deployment — restore unavailable")
+        : s.source.value("recovery_threshold").isNull() ? "Disabled by calibration (null threshold)"
+        : "Unavailable / invalid source threshold");
     active_->setText(s.active());
     status_->setText(controller_->status());
     information_->setPlainText(s.information());
@@ -201,10 +231,8 @@ void RecoveryPanel::update()
         const QSignalBlocker a(enabled_), b(thresholdMode_), c(custom_);
         enabled_->setChecked(s.api.value("requested").toObject().value("enabled").toBool());
         const auto selected = s.api.value("selected_threshold");
-        const bool custom = selected.isDouble() &&
-                            (!s.calibrated() || !thresholds::equal(selected.toDouble(), *s.calibrated()));
-        thresholdMode_->setCurrentIndex(custom ? 1 : 0);
-        custom_->setText(custom ? QString::number(selected.toDouble(), 'g', 17) : QString());
+        thresholdMode_->setCurrentIndex(2);
+        custom_->setText(selected.isDouble() ? QString::number(selected.toDouble(), 'g', 17) : QString());
     }
     // Editing drafts never sends a command. Refresh leaves existing drafts intact.
     if (!controller_->blocking())
@@ -217,5 +245,6 @@ void RecoveryPanel::update()
     apply_->setEnabled(controller_->ready());
     restore_->setEnabled(controller_->ready() && s.sourceAvailable && s.sourceUnchanged);
     refresh_->setEnabled(controller_->refreshAvailable());
-    deployment_->setEnabled(controller_->refreshAvailable());
+    deploymentGroup_->setEnabled(controller_->refreshAvailable() && deploymentSupport_ != false);
+    deploymentGroup_->setToolTip(deploymentSupport_ == false ? "Recovery unavailable: selected model has a single output" : "");
 }
