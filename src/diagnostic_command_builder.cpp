@@ -496,6 +496,26 @@ QString stopDirectRuntimeCommand() {
       .arg(stateVariables());
 }
 
+QString quickAvailabilityCheck(const DiagnosticRuntimeOptions & /* options */) {
+  const QString service = QString::fromLatin1(kServiceName);
+  const QString activeManifest = QString::fromLatin1(kActiveManifest);
+  const QString activeEngine = QString::fromLatin1(kActiveEngine);
+  return QStringLiteral(
+      "printf 'SSH connection successful\\n'; "
+      "service_state=\"$(systemctl is-active %1.service 2>/dev/null || true)\"; "
+      "printf '__SERVICE_STATE__=%s\\n' \"$service_state\"; "
+      "if test -r %2 && test -r %3; then "
+      "  active_model=\"$(sed -n 's/^model_name=//p' %2 | tail -n 1)\"; "
+      "  active_variant=\"$(sed -n 's/^model_variant=//p' %2 | tail -n 1)\"; "
+      "  printf '__MODEL_READY__=%s\\n' \"yes\"; "
+      "  printf '__ACTIVE_MODEL__=%s\\n' \"$active_model\"; "
+      "  printf '__ACTIVE_VARIANT__=%s\\n' \"$active_variant\"; "
+      "else "
+      "  printf '__MODEL_READY__=%s\\n' \"no\"; "
+      "fi")
+      .arg(service, posixShellQuote(activeManifest), posixShellQuote(activeEngine));
+}
+
 QString availabilityProbeCommand(const DiagnosticRuntimeOptions &options) {
   const QString config = posixShellQuote(QDir::cleanPath(options.configPath));
   const QString modelName = posixShellQuote(options.modelName);

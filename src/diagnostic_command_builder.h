@@ -62,6 +62,8 @@ validateRuntimeCommand(const DiagnosticRuntimeOptions &options);
 startDirectRuntimeCommand(const DiagnosticRuntimeOptions &options);
 [[nodiscard]] QString stopDirectRuntimeCommand();
 [[nodiscard]] QString
+quickAvailabilityCheck(const DiagnosticRuntimeOptions &options);
+[[nodiscard]] QString
 availabilityProbeCommand(const DiagnosticRuntimeOptions &options);
 [[nodiscard]] QString rebuildRuntimeCommand();
 

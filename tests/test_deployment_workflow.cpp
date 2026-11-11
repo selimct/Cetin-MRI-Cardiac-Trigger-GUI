@@ -43,11 +43,18 @@ private slots:
     qputenv("PATH", dir.path().toUtf8() + "/bin:" + oldPath);
     write(dir.filePath("bin/ssh"), R"SH(#!/bin/bash
 last=${@: -1}
+# Support both quick check and full probe modes
 if [[ $last == *__JCG_SERVICE__* ]]; then
  echo __JCG_SERVICE__=yes
  echo __JCG_SERVICE_STATE__=active
  echo __JCG_SERVICE_ACTIVE__=yes
  echo __JCG_SCHEDULING_PROFILE__=bounded_rr20
+elif [[ $last == *__SERVICE_STATE__* ]]; then
+ # Quick check mode - return simplified output
+ echo "__SERVICE_STATE__=active"
+ echo "__MODEL_READY__=yes"
+ echo "__ACTIVE_MODEL__=test-model"
+ echo "__ACTIVE_VARIANT__=best"
 elif [[ $last == *journalctl* ]]; then
  echo '{"code":"worker_scheduling","thread":"dkfz-acquire","requested_realtime_priority":20,"policy":"rr","priority":20,"realtime_applied":true,"degraded":false,"error":0}'
  echo '{"code":"worker_scheduling","thread":"dkfz-infer","requested_realtime_priority":20,"policy":"other","priority":0,"realtime_applied":false,"degraded":true,"error":1,"prerequisite_error":"bounded limit missing"}'
