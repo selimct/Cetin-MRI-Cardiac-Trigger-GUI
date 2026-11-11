@@ -12,6 +12,22 @@ Developed at the German Cancer Research Center (DKFZ).
 
 ## Jetson Control GUI
 
+The optional backend `delayed_100hz` model uses four raw samples per frame and
+one primary output for the previous frame, using 10 ms of subsequent context.
+Published variants live under `finished_models/MODEL/delayed_100hz/` alongside
+`recovery/`, with unique model names such as `ecg3_delayed_100hz`.
+It requires separately trained weights and the matching updated backend. The
+finished-model selector and **Trained prediction** row display frame rate,
+window duration and target; deployed detector information includes physical
+holdoff duration. Probability telemetry identifies the previous-frame primary.
+The target is read-only model metadata. Select a separately trained model to
+change it; existing 50 Hz weights cannot be converted by a GUI switch. Single
+output delayed models disable recovery controls. Default current-frame models
+retain their existing behavior. Build TensorRT engines on the target Jetson;
+accuracy and sustained 100 Hz timing need validation before deployment.
+See the backend's `docs/100hz-delayed-target.md` for training, comparison and
+latency measurement commands. This GUI update does not activate a deployment.
+
 A local Qt 6 desktop application for controlling the existing live stack on the
 Jetson over SSH and viewing command output and service logs. Install the normal
 GUI on the desktop; no recovery add-on, helper package, Python installation or
@@ -293,7 +309,7 @@ runtime confirmation. Its original byte identity is unverified because existing
 manifests do not pin a source-config hash. Missing, mismatched, changed-during-read
 or newer source files are unavailable/unconfirmed; restoration refuses an
 unusable source. Published recovery artifacts under `finished_models/MODEL/recovery/`,
-`frozen_recovery/` and `lopo_recovery/` (plus legacy flat copies) are
+`frozen_recovery/`, `lopo_recovery/` and `delayed_100hz/` (plus legacy flat copies) are
 discovered as best from `best.pth` + `train_config.json`; intermediate tuning/fold
 artifacts outside finished_models are excluded. Capability/provenance never
 comes from a name suffix.

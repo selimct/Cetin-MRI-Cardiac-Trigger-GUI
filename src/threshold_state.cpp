@@ -78,6 +78,15 @@ namespace thresholds
         if (recovery != "true" && recovery != "false" && recovery != "1" && recovery != "0")
             fail("Malformed recovery_head");
         m.recoveryHead = recovery == "true" || recovery == "1";
+        const auto mode = m.values.value("prediction_mode", "current");
+        bool delayOk = false;
+        const auto delay = m.values.value("prediction_delay_frames", "0").toInt(&delayOk);
+        if (!delayOk || (mode != "current" && mode != "delayed_100hz") ||
+            delay != (mode == "delayed_100hz" ? 1 : 0)) fail("Invalid primary prediction target contract");
+        if (delay && (m.values.value("raw_hz").toDouble() != 400 ||
+            m.values.value("frame_size_raw").toInt() != 4 ||
+            m.values.value("window_size").toInt() < 2 || m.recoveryHead))
+            fail("Delayed primary requires 400 Hz input, four-sample frames and one output");
         m.recoveryThreshold = optionalNumber(m.values, "recovery_threshold");
         if (m.recoveryThreshold && (!m.recoveryHead || *m.recoveryThreshold <= 0))
             fail("Recovery threshold requires two outputs and a finite value in (0, 1]");

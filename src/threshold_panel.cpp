@@ -96,7 +96,17 @@ void ThresholdPanel::update()
 {
     const auto &m = controller_->manifest();
     const auto &r = controller_->readback();
-    model_->setText(controller_->deployment());
+    QString timing;
+    if (!m.contents.isEmpty()) {
+        const auto size = m.values.value("frame_size_raw").toDouble();
+        const auto hz = m.values.value("raw_hz").toDouble();
+        timing = m.values.value("prediction_mode", "current") == "delayed_100hz"
+            ? "\n100 Hz; previous-frame primary; 10 ms context"
+            : "\nCurrent-frame primary";
+        if (size > 0 && hz > 0) timing += QString("; holdoff %1 ms").arg(
+            m.values.value("holdoff_frames").toDouble() * size / hz * 1000, 0, 'g', 6);
+    }
+    model_->setText(controller_->deployment() + timing);
     values_->setText(m.contents.isEmpty() ? "Unavailable" : QString("Automatic %1; Weighted DER %2; Historical FP-first %3").arg(number(m.automatic), number(m.der), number(m.fp)));
     saved_->setText(m.contents.isEmpty() ? "Unavailable" : controller_->savedSource() + (m.manual ? ": " + number(m.manual) : "; no manual value saved; model default " + number(m.automatic)));
     policy_->setText(controller_->savedPolicy() + QString("; configured early-emission default %1")

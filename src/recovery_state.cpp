@@ -291,7 +291,8 @@ QString telemetryDescription(const QJsonObject &e)
     const auto schema = e.value("schema").toString();
     if (schema == "dkfz-live-probability-v1")
     {
-        QString text = "current-head probability=" + number(e.value("probability"));
+        QString text = (e.value("prediction_delay_frames").toInt() == 1
+            ? "previous-frame primary probability=" : "current-head probability=") + number(e.value("probability"));
         if (e.value("recovery_prob").isDouble())
             text += "; previous-frame recovery probability=" + number(e.value("recovery_prob"));
         if (e.value("recovery_emitted_now").isBool())

@@ -157,6 +157,7 @@ private:
   QLineEdit *modelNameEdit_{nullptr};
   QLineEdit *modelDirectoryEdit_{nullptr};
   QComboBox *variantCombo_{nullptr};
+  QLabel *modelTimingLabel_{nullptr};
   QComboBox *preparationModeCombo_{nullptr};
   QComboBox *outputModeCombo_{nullptr};
   QLineEdit *configPathEdit_{nullptr};

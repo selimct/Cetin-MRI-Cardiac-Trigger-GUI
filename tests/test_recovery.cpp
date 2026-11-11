@@ -259,6 +259,10 @@ class RecoveryTest final : public QObject
         QVERIFY(reexportModelCommand(options).endsWith("--no-recovery"));
         options.forceRecoveryOff = false;
         QVERIFY(!prepareModelCommand(options).contains("--no-recovery"));
+        const QJsonObject delayed{{"schema", "dkfz-live-probability-v1"},
+                                  {"probability", 0.9}, {"prediction_delay_frames", 1}};
+        QVERIFY(recovery::telemetryDescription(delayed).contains("previous-frame primary"));
+        QVERIFY(!recovery::telemetryDescription(delayed).contains("current-head"));
         QVERIFY(!finishedModelsCommand().contains("python"));
         auto probability = QJsonObject{{"schema", "dkfz-live-probability-v1"},
                                        {"probability", 0.2},

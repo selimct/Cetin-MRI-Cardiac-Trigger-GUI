@@ -10,12 +10,15 @@
 #include <QTest>
 #include <QFile>
 #include <QDir>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QTemporaryDir>
 
 class DiagnosticCommandBuilderTest final : public QObject {
   Q_OBJECT
 
 private slots:
+  void delayedPredictionDiscovery();
   void validatesParameters();
   void resolvesActiveManifest();
   void buildsServiceUnitRepairCommand();
@@ -29,6 +32,28 @@ private slots:
   void rejectsFilesChangedDuringValidation();
   void preparationChecksTheCurrentServiceState();
 };
+
+void DiagnosticCommandBuilderTest::delayedPredictionDiscovery() {
+  QJsonObject config{{"modelname","delayed"},{"raw_hz",400},{"frame_size_raw",4},{"window_size",100},
+      {"prediction_mode","delayed_100hz"},{"prediction_delay_frames",1},{"recovery_threshold",QJsonValue::Null}};
+  const auto line = [&](const QJsonObject &value) {
+    return "__JCG_FINISHED_MODEL__=" + QByteArray("finished_models/ecg3/delayed_100hz").toBase64() +
+        ":best:" + QJsonDocument(value).toJson(QJsonDocument::Compact).toBase64() + "\n";
+  };
+  auto models = parseFinishedModels(line(config));
+  QCOMPARE(models.size(),1);
+  QCOMPARE(models[0].directory,QString("finished_models/ecg3/delayed_100hz"));
+  QCOMPARE(models[0].frameHz,100.0);
+  QCOMPARE(models[0].predictionDelayFrames,1);
+  QVERIFY(models[0].predictionDescription().contains("Previous-frame primary"));
+  QVERIFY(models[0].predictionDescription().contains("window 1 s"));
+  config["frame_size_raw"] = 8;
+  QVERIFY(parseFinishedModels(line(config)).isEmpty());
+  config["frame_size_raw"] = 4; config["recovery_head"] = true;
+  QVERIFY(parseFinishedModels(line(config)).isEmpty());
+  config["recovery_head"] = false; config["prediction_delay_frames"] = 0;
+  QVERIFY(parseFinishedModels(line(config)).isEmpty());
+}
 
 void DiagnosticCommandBuilderTest::validatesParameters() {
   DiagnosticRuntimeOptions options{

@@ -343,6 +343,15 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
                     diagnosticPage);
   gpioSafetyCheck_->setEnabled(false);
 
+  modelTimingLabel_ = new QLabel(diagnosticPage);
+  modelTimingLabel_->setObjectName(QStringLiteral("trainedPredictionContract"));
+  modelTimingLabel_->setWordWrap(true);
+  modelTimingLabel_->setTextFormat(Qt::PlainText);
+  modelTimingLabel_->setToolTip(QStringLiteral(
+      "The prediction target is fixed by training. Deploy separately trained 100 Hz weights; "
+      "existing 50 Hz weights cannot be switched to a delayed target. "
+      "Accuracy and sustained Jetson latency require validation."));
+  deploymentForm->addRow(QStringLiteral("Trained prediction"), modelTimingLabel_);
   deploymentForm->addRow(QStringLiteral("Model name"), modelNameEdit_);
   deploymentForm->addRow(QStringLiteral("Model source directory"),
                          modelDirectoryEdit_);
@@ -1301,7 +1310,8 @@ void MainWindow::applyFinishedModels(const QByteArray &output) {
   for (const auto &model : finishedModels_) {
     finishedModelCombo_->addItem(model.name + (model.variant == "tuned" ? " — Fine-tuned" : "") +
         " — " + model.kind +
-        (model.recoverySupported ? " — Recovery supported" : " — Current output only"));
+        " — " + model.predictionDescription() +
+        (model.recoverySupported ? " — Recovery supported" : " — Single output"));
     finishedModelCombo_->setItemData(finishedModelCombo_->count()-1,
         QString("Source: %1\nPublished artifact: %2").arg(model.directory, model.variant), Qt::ToolTipRole);
   }
@@ -1320,6 +1330,8 @@ void MainWindow::syncFinishedModelSelection() {
     }
   }
   finishedModelCombo_->setCurrentIndex(index);
+  modelTimingLabel_->setText(index > 0 ? finishedModels_.at(index-1).predictionDescription()
+      : QStringLiteral("Refresh source models to read their trained timing contract; native validation is required."));
   recoveryPanel_->setDeploymentRecoverySupport(index > 0
       ? std::optional<bool>(finishedModels_.at(index - 1).recoverySupported) : std::nullopt);
 }

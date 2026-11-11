@@ -14,6 +14,11 @@ struct FinishedModel {
   QString variant;
   bool recoverySupported{false};
   QString kind;
+  QString predictionMode{"current"};
+  int predictionDelayFrames{0};
+  double frameHz{0};
+  int windowFrames{0};
+  QString predictionDescription() const;
 };
 
 [[nodiscard]] QString finishedModelsCommand();

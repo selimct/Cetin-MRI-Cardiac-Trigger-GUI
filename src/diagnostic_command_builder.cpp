@@ -217,7 +217,7 @@ QString finishedModelsCommand() {
   return QString::fromUtf8(R"SH(
 catalog_root=$(pwd -P)
 for family in finished_models/*; do
- for directory in "$family" "$family/recovery" "$family/frozen_recovery" "$family/lopo_recovery"; do
+ for directory in "$family" "$family/recovery" "$family/frozen_recovery" "$family/lopo_recovery" "$family/delayed_100hz"; do
   test -d "$directory" || continue
   resolved_directory=$(readlink -f -- "$directory") || continue
   case "$resolved_directory" in "$catalog_root"/*) ;; *) continue;; esac
@@ -241,6 +241,33 @@ done
 )SH");
 }
 
+
+QString FinishedModel::predictionDescription() const {
+  const auto target = predictionDelayFrames == 1 ? QStringLiteral("Previous-frame primary; 10 ms context")
+                                                 : QStringLiteral("Current-frame target");
+  return frameHz > 0 ? QString("%1; %2 Hz; window %3 s").arg(target)
+      .arg(frameHz, 0, 'g', 6).arg(windowFrames / frameHz, 0, 'g', 6) : target;
+}
+
+static bool readPredictionContract(const QJsonObject &config, FinishedModel &model) {
+  const auto mode = config.value("prediction_mode");
+  if (!mode.isUndefined() && !mode.isString()) return false;
+  model.predictionMode = mode.toString("current");
+  if (model.predictionMode != "current" && model.predictionMode != "delayed_100hz") return false;
+  const int expected = model.predictionMode == "delayed_100hz" ? 1 : 0;
+  const auto delay = config.value("prediction_delay_frames");
+  if ((!delay.isUndefined() && (!delay.isDouble() || delay.toDouble() != expected)) ||
+      (expected && delay.isUndefined())) return false;
+  model.predictionDelayFrames = expected;
+  const auto size = config.value("frame_size_raw").toDouble();
+  const auto hz = config.value("raw_hz").toDouble();
+  model.frameHz = size > 0 && hz > 0 ? hz / size : 0;
+  model.windowFrames = config.value("window_size").toInt();
+  return !expected || (hz == 400 && size == 4 && model.windowFrames >= 2 && !model.recoverySupported &&
+      !config.value("recovery_only").toBool(false) &&
+      (config.value("recovery_threshold").isNull() || config.value("recovery_threshold").isUndefined()));
+}
+
 QList<FinishedModel> parseFinishedModels(const QByteArray &output) {
   QList<FinishedModel> result;
   for (const auto &line : output.split('\n')) {
@@ -253,6 +280,7 @@ QList<FinishedModel> parseFinishedModels(const QByteArray &output) {
                           QString::fromUtf8(QByteArray::fromBase64(parts[0])),
                           QString::fromLatin1(parts[1]), config.value("recovery_head").toBool(false),
                           recovery::modelKind(config)};
+      if (!readPredictionContract(config, model)) continue;
       DiagnosticRuntimeOptions options;
       options.modelName = model.name; options.modelDirectory = model.directory; options.variant = model.variant;
       if (model.directory.startsWith("finished_models/") && validateDiagnosticOptions(options).isEmpty()) result.append(model);
@@ -268,6 +296,7 @@ QList<FinishedModel> parseFinishedModels(const QByteArray &output) {
                           object.value("directory").toString(),
                           object.value("variant").toString(), object.value("recovery_head").toBool(false),
                           recovery::modelKind(object)};
+      if (!readPredictionContract(object, model)) continue;
       DiagnosticRuntimeOptions options;
       options.modelName = model.name;
       options.modelDirectory = model.directory;

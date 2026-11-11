@@ -79,6 +79,9 @@ private slots:
     writeFile(dir.filePath("finished_models/heart_legacy_recovery/best.pth"), "published");
     writeFile(dir.filePath("finished_models/z_normal/train_config.json"), "{\"modelname\":\"misleading_recovery\"}");
     writeFile(dir.filePath("finished_models/z_normal/best.pth"), "published");
+    writeFile(dir.filePath("finished_models/z_normal/delayed_100hz/train_config.json"),
+        "{\"modelname\":\"z_normal_delayed_100hz\",\"prediction_mode\":\"delayed_100hz\",\"prediction_delay_frames\":1,\"raw_hz\":400,\"frame_size_raw\":4,\"window_size\":100}");
+    writeFile(dir.filePath("finished_models/z_normal/delayed_100hz/best.pth"), "delayed weights");
     writeFile(dir.filePath("finished_models/heart/internal/outer/train_config.json"), "{\"modelname\":\"internal\"}");
     writeFile(dir.filePath("finished_models/heart/internal/outer/best.pth"), "intermediate");
     writeFile(dir.filePath("models/heart_lopo_recovery_cv/nested_recovery_lopo/best_tuned.pth"), "intermediate");
@@ -117,7 +120,7 @@ printf 'model_name=%s\nsource_model_dir=%s\nmodel_variant=%s\n' "$1" "$3" "$5" >
     QVERIFY(recoveryPolicy);
     QVERIFY(readFile(dir.filePath("ssh.calls")).isEmpty());
     refresh->click();
-    QTRY_COMPARE_WITH_TIMEOUT(models->count(), 8, 5000); // Placeholder, best/tuned, three nested recovery kinds, legacy flat recovery, normal.
+    QTRY_COMPARE_WITH_TIMEOUT(models->count(), 9, 5000); // Also discover the nested 100 Hz sibling.
     QTRY_VERIFY_WITH_TIMEOUT(refresh->isEnabled(), 5000);
     for (int index = 3; index < 7; ++index) {
       QVERIFY(models->itemText(index).contains("_recovery"));
@@ -129,7 +132,14 @@ printf 'model_name=%s\nsource_model_dir=%s\nmodel_variant=%s\n' "$1" "$3" "$5" >
     QVERIFY(models->itemText(5).contains("LOPO-recovery"));
     QVERIFY(models->itemText(6).contains("training mode unknown"));
     QVERIFY(models->itemText(7).contains("Normal (single output)"));
+    QVERIFY(models->itemText(8).contains("Previous-frame primary"));
+    QVERIFY(models->itemText(8).contains("100 Hz"));
     const auto beforeSelection = readFile(dir.filePath("ssh.calls"));
+    models->setCurrentIndex(8);
+    QVERIFY(QMetaObject::invokeMethod(models, "activated", Q_ARG(int, 8)));
+    QCOMPARE(name->text(), QString("z_normal_delayed_100hz"));
+    QCOMPARE(directory->text(), QString("finished_models/z_normal/delayed_100hz"));
+    QVERIFY(!recoveryPolicy->isEnabled());
     models->setCurrentIndex(7);
     QVERIFY(QMetaObject::invokeMethod(models, "activated", Q_ARG(int, 7)));
     QVERIFY(!recoveryPolicy->isEnabled());
