@@ -19,6 +19,8 @@ private slots:
   void compactsRuntimeStatusForServiceLogs();
   void compactsOtherStructuredServiceLogs();
   void preservesUnstructuredServiceLogs();
+  void displaysSchedulingAndDeadlines();
+  void preservesCandidateAndEmissionCoordinates();
 };
 
 void ConsoleOutputClassifierTest::classifiesStructuredSeverities() {
@@ -117,6 +119,38 @@ void ConsoleOutputClassifierTest::compactsOtherStructuredServiceLogs() {
 void ConsoleOutputClassifierTest::preservesUnstructuredServiceLogs() {
   const QByteArray reboot = "-- Boot 1a2b3c4d --\n";
   QCOMPARE(serviceLogDisplayLine(reboot), reboot);
+}
+
+void ConsoleOutputClassifierTest::displaysSchedulingAndDeadlines() {
+  const QByteArray worker = R"({"severity":"warning","code":"worker_scheduling","thread":"dkfz-inference","requested_realtime_priority":20,"policy":"other","priority":0,"realtime_applied":false,"degraded":true,"error":1,"prerequisite_error":"Missing bounded RT limit"})";
+  const auto text = serviceLogDisplayLine(worker);
+  for (const auto &part : {"thread=dkfz-inference", "policy=other", "priority=0", "requested_realtime_priority=20", "degraded=true", "realtime_applied=false", "error=1"})
+    QVERIFY(text.contains(part));
+  QCOMPARE(classifyConsoleLine(worker), ConsoleLineSeverity::elevated);
+  const QByteArray health = R"({"severity":"info","code":"runtime_status","missed_frame_deadlines":6,"max_frame_end_to_completion_ns":23789000})";
+  QVERIFY(serviceLogDisplayLine(health).contains("missed frame deadlines=6"));
+  QVERIFY(serviceLogDisplayLine(health).contains("max frame delay=23.789 ms (host decode to completion)"));
+  QCOMPARE(classifyConsoleLine(health), ConsoleLineSeverity::elevated);
+  const auto zero = serviceLogDisplayLine(R"({"code":"runtime_status","missed_frame_deadlines":0,"max_frame_end_to_completion_ns":0})");
+  QVERIFY(zero.contains("missed frame deadlines=0"));
+  QVERIFY(zero.contains("max frame delay=0 ms"));
+  QVERIFY(!serviceLogDisplayLine(R"({"code":"runtime_status"})").contains("deadlines=0"));
+}
+
+void ConsoleOutputClassifierTest::preservesCandidateAndEmissionCoordinates() {
+  const QByteArray trigger = R"({"schema":"dkfz-live-trigger-v1","peak_frame_idx_50hz":99,"peak_sample_idx_400hz":396,"peak_time_ms":990,"emitted_on_frame_idx_50hz":101,"emitted_on_sample_idx_400hz":407,"emitted_on_time_ms":1017.5,"decision_monotonic_ns":12345,"gpio_asserted_monotonic_ns":null,"probability":0.9})";
+  const auto text = serviceLogDisplayLine(trigger + '\n');
+  QVERIFY(text.startsWith(trigger + " | ")); // Original coordinates and clocks survive byte for byte.
+  QVERIFY(text.contains("candidate frame=99"));
+  QVERIFY(text.contains("candidate time ms=990"));
+  QVERIFY(text.contains("actual emission frame=101"));
+  QVERIFY(text.contains("actual emission time ms=1017.5"));
+  const QByteArray probability = R"({"schema":"dkfz-live-probability-v1","probability":0.9,"prediction_delay_frames":1,"frame_idx_50hz":99,"observed_frame_idx":100,"observed_time_ms":1000,"time_ms":990})";
+  const auto delayed = serviceLogDisplayLine(probability);
+  QVERIFY(delayed.startsWith(probability));
+  QVERIFY(delayed.contains("previous-frame primary probability"));
+  QVERIFY(delayed.contains("target frame=99; observed frame=100"));
+  QVERIFY(delayed.contains("observed time ms=1000"));
 }
 
 QTEST_APPLESS_MAIN(ConsoleOutputClassifierTest)

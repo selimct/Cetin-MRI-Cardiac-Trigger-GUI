@@ -7,6 +7,7 @@
 #include <QByteArray>
 #include <QList>
 #include <QString>
+#include <QStringList>
 
 struct FinishedModel {
   QString name;
@@ -18,6 +19,7 @@ struct FinishedModel {
   int predictionDelayFrames{0};
   double frameHz{0};
   int windowFrames{0};
+  double holdoffMs{-1};
   QString predictionDescription() const;
 };
 
@@ -35,10 +37,16 @@ struct DiagnosticRuntimeOptions {
   QString rawCapturePath;
   bool emitProbabilities{false};
   bool forceRecoveryOff{false};
+  QString bundleDirectory;
+  QStringList validationInputs;
+  QString pythonExecutable{"/home/orin/envs/jet/bin/python"};
+  bool ecg3SourceConfirmed{false};
 };
 
 [[nodiscard]] QString
 validateDiagnosticOptions(const DiagnosticRuntimeOptions &options);
+[[nodiscard]] QString validatePreparationOptions(const DiagnosticRuntimeOptions &options);
+[[nodiscard]] QString activatePreparedModelCommand(const DiagnosticRuntimeOptions &options);
 [[nodiscard]] QString diagnosticManifestPath();
 [[nodiscard]] QString serviceUnitRepairCommand(bool sudoPasswordProvided);
 [[nodiscard]] QString

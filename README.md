@@ -36,46 +36,66 @@ local live-stack checkout. `remote_directory` is the existing remote project roo
 
 For normal use:
 
-1. Open **Connection**, enter the SSH settings, and press **Check** or **Enter**.
-2. Select a published model from **Finished models**.
-3. Choose **Persistent startup recovery**: **Use saved recovery settings**, or
-   **Recovery off — current output only**.
-4. Review the existing hardware checkbox and click **Deploy and start**. This
-   sends the existing stop → prepare → validate → start commands over SSH.
-5. Press **Check**, **Refresh**, or **Enter** when you want updated information.
+1. Open **Connection**, enter SSH settings, and press **Check** or **Enter**.
+2. Select a published model from **Finished models** and choose its persistent
+   startup recovery policy. Selection sends no command.
+3. With the detector already idle, enter a **new bundle directory** outside
+   `deploy/`, the Jetson Python executable, and representative raw parquet
+   **Validation recordings**, one path per line. Confirm that training used
+   **ECG3 = ECG2 − ECG1**, as derived by the UART runtime after offset removal.
+4. Select **Prepare isolated bundle**. This runs `--prepare-only`, repeats
+   `--validation-input`, and uses `--max-stream-samples 0` for full recordings.
+   Both 50 Hz and delayed 100 Hz use saved PTH weights to rebuild ONNX and
+   TensorRT on the target. Preparation never stops or starts the service.
+5. Inspect the bundle's `validation_report.json`, numerical and stream logs,
+   and positive event coverage. Independently review accuracy, sustained
+   processing and physical timing. A preparation pass only establishes the
+   backend's equivalence and inference-only timing checks.
+6. Acknowledge acceptance of that independent qualification, select **Check**,
+   then **Activate prepared bundle**. Activation passes the prepared config,
+   checkpoint, engine and fingerprinted report to `run/deploy_model.sh`.
+   It installs files without starting the service.
+7. Select **Check**, review hardware confirmation, then use the separate
+   **Start** action only when physical operation is intended.
 
-To persist recovery off and back on for the **same two-output model**, keep that
-model selected, change only Startup recovery, and deploy/start it again. Off
-forwards `--no-recovery` to preparation. Saved settings omit that flag and restore
-the source policy. Both keep `recovery_head=true`; no retraining or new checkpoint
-is needed. Restoring saved settings enables recovery only if the source policy
-enables it and has a valid threshold; a null threshold or disabled source policy
-stays off. This works without a live recovery switching API, provided the runtime
-already supports two-output recovery models.
+Preparation, activation and observed service process state have separate status
+labels. Successful preparation never marks accuracy or sustained performance
+verified. Editing the model, bundle, recordings, Python executable, ECG-source
+confirmation or recovery policy clears preparation eligibility and qualification
+acknowledgement. A fresh preparation uses a new directory; failed evidence is
+retained. Existing prepared bundles cannot be imported into a new GUI session.
+The GUI delegates report fingerprints and final activation checks to the backend.
+
+To persist recovery off and back on for the **same two-output model**, prepare
+and review a new bundle with the desired startup policy, activate it while idle,
+then restart separately when intended. Off forwards `--no-recovery` to both
+preparation and activation. Saved settings omit the flag and respect source
+defaults, including a disabled policy or null threshold. Both preserve
+`recovery_head=true`; neither changes source weights or configuration.
 
 For a live change on a service that supports the existing native recovery API,
 use **Detector controls → Live recovery override**. Leave **Keep selected
 threshold** selected, edit the recovery checkbox, and click **Apply recovery**.
 This override expires with the service invocation; see the persistence table below.
 
-Selecting a model or editing a draft sends no SSH commands. Apply, preparation,
+Selecting a model or editing a draft sends no SSH commands. Apply, preparation, activation,
 service start and restart do not schedule status refreshes. Check and Enter read
 the current deployment plus recovery and primary policies once; the individual
 Refresh buttons read their respective state. There is no periodic polling.
-Deploy and start performs the validation needed to start safely, then leaves
-runtime policy confirmation to your next Check/Refresh/Enter action.
+Preparation and activation never schedule service actions. Check/Refresh/Enter
+reads runtime policy confirmation explicitly.
 
 The GUI does not copy or install runtime binaries. It uses only the remote
 stack's existing commands and configuration. Live controls are available only
 when that stack already exposes a supported recovery API and matching readback;
-otherwise use the startup choice and stop/prepare/start cycle. Missing live
+otherwise use the startup choice and separate idle preparation, activation and service actions. Missing live
 support is never presented as a requirement to install something through the GUI.
 
-Model preparation retains the existing backend's export/parity environment
-requirements described below. Failed or cancelled deployment stops the sequence;
-the GUI does not start an unvalidated model. It checks the deployment,
-configuration and runtime revisions again before starting. Individual preparation
-and service actions remain available for manual operation.
+Model preparation requires the updated backend's isolated export/parity tools.
+The GUI does not fall back to the old prepare-and-activate workflow. A failed or
+cancelled request leaves the remote result unconfirmed; Check before continuing.
+Service Start rechecks manifest, config and runtime revisions before executing.
+Activation and service Start are always separate explicit actions.
 
 | Computer | Required checkout | Purpose |
 | --- | --- | --- |
@@ -140,8 +160,27 @@ file, but runtime, config, manifest, and engine changes need only a service
 restart. The GUI cannot prove electrical safety.
 
 The first tab, **Installed service**, also contains the **Finished models**
-selector, **Refresh models**, and **Re-export weights + activate** button.
+selector, **Refresh models**, isolated preparation inputs and the separate
+**Prepare isolated bundle** and **Activate prepared bundle** buttons.
 Model selection stays local until you select **Check availability**.
+
+The preflight accepts both the original unit and the bounded worker profile:
+`--realtime-priority 20 --require-realtime`, loaded `LimitRTPRIO=20`, hard/soft
+`LimitRTTIME=200000` µs, normal main-thread scheduling, `CPUWeight=1000` and
+`TimerSlackNSec=1000`. It rejects unknown command profiles or incompatible loaded
+limits. This is read-only configuration evidence; it does not promote SSH
+workers, install the profile, or prove deadlines. Worker RR scheduling is bounded
+CPU-use protection, not a maximum frame-completion guarantee.
+
+**Follow log** and direct output show each observed worker's actual policy and
+priority, requested priority, application result, degradation and errors. The
+status label explicitly treats journal history as unconfirmed for the current
+service invocation. Runtime health retains `missed_frame_deadlines` and
+`max_frame_end_to_completion_ns` even without probability output; the GUI displays
+maximum frame delay in milliseconds with its host-UART-decode anchor. Missing
+telemetry stays unavailable. Configuration/readiness alone cannot prove actual
+scheduling or sustained timing. No power, clock or scheduler settings are changed
+by these checks. See [runtime integration limitations](docs/runtime-integration.md).
 
 ### Diagnostic / direct
 
@@ -149,13 +188,12 @@ Operates the current checkout beneath the selected remote project root. It can:
 
 - build the TensorRT-enabled native runtime initially or rebuild it
   incrementally;
-- prepare a selected best/tuned model on the Jetson in either of two modes:
-  TensorRT from an existing ONNX (`--jetson-only`), or the complete
-  PTH-to-ONNX-to-TensorRT pipeline;
+- prepare a selected best/tuned model in an isolated Jetson bundle, using the
+  same recordings and ECG-source confirmation as the Installed service tab;
 - select an exact source directory such as `finished_models/target_r`, `finished_models/target_r/recovery` or
   `models_noCV/target_r` and pass it through `--model-dir`;
-- atomically activate the resulting engine and manifest as
-  `deploy/model/model.engine` and `deploy/model/model.conf`;
+- validate the current active engine and configuration (activation is a
+  separate action on the Installed service tab);
 - validate the configuration and deserialize/check the TensorRT engine;
 - start and stop the integrated runtime directly;
 - select `none`, `jsonl`, `gpio`, or `gpio+jsonl` trigger output;
@@ -163,15 +201,18 @@ Operates the current checkout beneath the selected remote project root. It can:
 - append stdout and stderr to a session log beneath the project root; and
 - optionally capture raw UART bytes beneath the project root.
 
-Both the service and direct runtime consume the stable `deploy/model` slot.
-**Re-export weights + activate** runs the full saved-PTH-to-ONNX-to-TensorRT
-pipeline in one action, including parity checks and activation. It works
-without an existing ONNX file regardless of the preparation mode selection.
-After success, select **Check** to refresh availability and validate readiness
-before starting the model again. Stop the service and direct inference
-first; the native runtime and full Jetson Python environment must be installed.
-Selecting an entry in the dropdown fills the declared model name, exact source
-directory, and variant locally. Select **Check** to query the Jetson for that selection.
+Both service and direct runtime consume the stable `deploy/model` slot.
+Isolated preparation requires the matching saved PTH and training configuration;
+it rebuilds ONNX even when an older ONNX file exists. `--jetson-only` selects the
+target phase; paired with `--prepare-only` it uses the isolated backend pipeline.
+The tuned variant is copied to the bundle as `model/train_config.json` and
+`model/best.pth`; activation retains the selected `--variant tuned` identity.
+The GUI adds a relative `model/tuning/tuned_config.json` link to the unchanged
+copied config for the backend's tuned recovery-source lookup.
+Keep the full bundle for activation, report verification and source readback.
+
+Selecting an entry fills its declared model name, source directory and variant
+locally. Select **Check** to query the Jetson for that selection.
 
 The GUI reads its model name, variant, and source directory and prevents direct
 Start when they do not match the current selection. Model preparation is
@@ -186,12 +227,10 @@ Direct Start stays disabled until the selected configuration and engine pass
 validation, and direct/service starts are mutually locked to avoid competing
 for the same UART or GPIO resources.
 
-Both preparation modes require the selected variant's training configuration
-and checkpoint on the Jetson because the standard TensorRT parity step uses
-PyTorch. Existing-ONNX mode additionally requires the correctly named ONNX
-artifact. Complete mode creates that ONNX artifact and runs PyTorch/ONNX parity
-before continuing with TensorRT. It therefore requires the full configured
-Jetson Python environment, not just `trtexec`.
+Preparation needs the full Jetson Python export/parity environment and a built
+native runtime, rather than only `trtexec`. ONNX Runtime is optional when the
+backend's CPU reference evaluator is available. Source files and recordings are
+left unchanged; derived ECG3 parity data is temporary.
 
 The direct runtime remains attached to SSH for live output. The GUI records its
 PID in the remote user's runtime directory, and Stop verifies that PID's
@@ -265,9 +304,10 @@ JSON, calibrated thresholds, preprocessing, holdoff, or the other head's policy.
 Saved files and successful requests are never treated as active confirmation.
 
 Choose **Use saved recovery settings** or **Recovery off — current output only** in the recovery deployment section. This is a preparation
-setting beside model selection: both preparation modes forward `--no-recovery`
+setting beside model selection: isolated preparation and activation forward `--no-recovery`
 when selected. Restoring the saved deployment selection only edits that draft.
-Use **Deploy and start** to apply it, or the individual service/preparation actions. Omitting the flag
+Prepare a new bundle, review its evidence, activate it while idle and start
+the service separately when intended. Omitting the flag
 respects disabled source defaults and null calibration; there is no preparation
 flag to force recovery on, and no training JSON is rewritten. Preparation/export
 itself retains the backend's existing environment requirements described above.
@@ -422,6 +462,13 @@ They cover all four model kinds, independent policy writes and calibration
 preservation, threshold bounds, enable/disable without threshold replacement,
 restore eligibility, restart selection versus startup policy, and rejection of
 stale or mismatched readback. Tests need no Jetson, UART, GPIO, or running service.
+
+`deployment-workflow`, `diagnostic-command-builder`, and
+`console-output-classifier` also cover isolated preparation/activation arguments,
+recordings and ECG confirmation, 50/100 Hz timing, best/tuned variants, report
+rejection, stale activity, bounded scheduling profiles and observed worker
+degradation, missed deadlines and unchanged emission coordinates. See
+[runtime integration and remaining validation](docs/runtime-integration.md).
 
 ## Local connection file
 

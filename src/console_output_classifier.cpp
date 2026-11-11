@@ -195,6 +195,11 @@ QString runtimeStatusText(const QJsonObject &object) {
              object.value("active_recovery_enabled").toBool() ? jsonValueText(object.value("active_recovery_threshold")) : "null",
              object.value("recovery_request_id").toString()));
   }
+  const QString missed = integerValue(object, "missed_frame_deadlines");
+  const QString maxDelay = integerValue(object, "max_frame_end_to_completion_ns");
+  if (!missed.isEmpty()) sections.append("missed frame deadlines=" + missed);
+  if (!maxDelay.isEmpty()) sections.append("max frame delay=" + durationMilliseconds(maxDelay) +
+      " ms (host decode to completion)");
   const QString resets = integerValue(object, "input_state_resets");
   if (!resets.isEmpty() && resets != QStringLiteral("0")) {
     sections.append(QStringLiteral("input resets=%1").arg(resets));
@@ -230,6 +235,8 @@ ConsoleLineSeverity classifyConsoleLine(const QByteArray &line) {
 
     const QString severity =
         object.value(QStringLiteral("severity")).toString().toLower();
+    if (object.value("degraded").toBool() || object.value("missed_frame_deadlines").toInteger() > 0)
+      return ConsoleLineSeverity::elevated;
     if (severity == QStringLiteral("debug") ||
         severity == QStringLiteral("info")) {
       return ConsoleLineSeverity::informational;

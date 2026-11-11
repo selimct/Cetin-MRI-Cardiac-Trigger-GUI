@@ -103,8 +103,14 @@ void ThresholdPanel::update()
         timing = m.values.value("prediction_mode", "current") == "delayed_100hz"
             ? "\n100 Hz; previous-frame primary; 10 ms context"
             : "\nCurrent-frame primary";
-        if (size > 0 && hz > 0) timing += QString("; holdoff %1 ms").arg(
-            m.values.value("holdoff_frames").toDouble() * size / hz * 1000, 0, 'g', 6);
+        if (size > 0 && hz > 0) {
+            timing += QString("; %1 Hz").arg(hz / size, 0, 'g', 6);
+            bool windowOk = false, holdoffOk = false;
+            const auto window = m.values.value("window_size").toDouble(&windowOk);
+            const auto holdoff = m.values.value("holdoff_frames").toDouble(&holdoffOk);
+            timing += windowOk && window > 0 ? QString("; window %1 s").arg(window * size / hz, 0, 'g', 6) : "; window unavailable";
+            timing += holdoffOk && holdoff >= 0 ? QString("; holdoff %1 ms").arg(holdoff * size / hz * 1000, 0, 'g', 6) : "; holdoff unavailable";
+        }
     }
     model_->setText(controller_->deployment() + timing);
     values_->setText(m.contents.isEmpty() ? "Unavailable" : QString("Automatic %1; Weighted DER %2; Historical FP-first %3").arg(number(m.automatic), number(m.der), number(m.fp)));

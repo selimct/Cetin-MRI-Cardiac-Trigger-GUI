@@ -13,6 +13,7 @@
 #include <QJsonObject>
 #include <QRegularExpression>
 #include <QStringList>
+#include <cmath>
 
 namespace {
 constexpr auto kRuntimeExecutable =
@@ -99,14 +100,41 @@ QString preparationInputCheck(const DiagnosticRuntimeOptions &options) {
   QString check =
       QStringLiteral("test -f %1 && test -f %2")
           .arg(posixShellQuote(config), posixShellQuote(checkpoint));
-  if (options.preparationMode == QStringLiteral("jetson-only")) {
-    const QString onnx =
-        modelDirectory +
-        (tuned ? QStringLiteral("%1_best_tuned.onnx").arg(options.modelName)
-               : QStringLiteral("%1.onnx").arg(options.modelName));
-    check += QStringLiteral(" && test -f %1").arg(posixShellQuote(onnx));
-  }
+  // Isolated preparation always exports from the saved checkpoint.
   return check;
+}
+
+QString idleDetectorGuard() {
+  return QStringLiteral(
+      "service_state=\"$(systemctl is-active %1.service 2>/dev/null || true)\"; "
+      "case \"$service_state\" in inactive|failed) ;; active|activating|reloading|deactivating) "
+      "printf 'Stop the service before preparing or activating a model.\\n' >&2; exit 3;; *) "
+      "test \"$(systemctl show --value -p LoadState %1.service 2>/dev/null || true)\" = not-found || "
+      "{ printf 'Cannot verify that the service is stopped. Check again.\\n' >&2; exit 3; };; esac; "
+      "%2; if test -s \"$pid_file\" && kill -0 \"$(cat -- \"$pid_file\")\" 2>/dev/null; then "
+      "printf 'Stop direct inference before preparing or activating a model.\\n' >&2; exit 3; fi; ")
+      .arg(QString::fromLatin1(kServiceName), stateVariables());
+}
+
+QString serviceSchedulingCheck() {
+  return QString::fromUtf8(R"SH(
+scheduling_profile=unknown
+if grep -Fqx -- 'ExecStart=/opt/dkfz-live/build_native/inference/native_uart_live_runtime --config /opt/dkfz-live/config/native_uart_live.conf' deploy/dkfz-native-uart-live.service; then
+  scheduling_profile=legacy
+elif grep -Fqx -- 'ExecStart=/opt/dkfz-live/build_native/inference/native_uart_live_runtime --config /opt/dkfz-live/config/native_uart_live.conf --realtime-priority 20 --require-realtime' deploy/dkfz-native-uart-live.service &&
+     test "$(systemctl show --value -p LimitRTPRIO dkfz-native-uart-live.service)" = 20 &&
+     test "$(systemctl show --value -p LimitRTPRIOSoft dkfz-native-uart-live.service)" = 20 &&
+     test "$(systemctl show --value -p LimitRTTIME dkfz-native-uart-live.service)" = 200000 &&
+     test "$(systemctl show --value -p LimitRTTIMESoft dkfz-native-uart-live.service)" = 200000 &&
+     test "$(systemctl show --value -p CPUSchedulingPolicy dkfz-native-uart-live.service)" = 0 &&
+     test "$(systemctl show --value -p CPUWeight dkfz-native-uart-live.service)" = 1000 &&
+     test "$(systemctl show --value -p TimerSlackNSec dkfz-native-uart-live.service)" = 1000 &&
+     scheduling_help=$(build_native/inference/native_uart_live_runtime --help 2>/dev/null) &&
+     printf '%s' "$scheduling_help" | grep -Fq -- '--realtime-priority' &&
+     printf '%s' "$scheduling_help" | grep -Fq -- '--require-realtime'; then
+  scheduling_profile=bounded_rr20
+fi
+)SH");
 }
 } // namespace
 
@@ -162,6 +190,22 @@ QString diagnosticManifestPath() {
   return QString::fromLatin1(kActiveManifest);
 }
 
+QString validatePreparationOptions(const DiagnosticRuntimeOptions &options) {
+  const auto error = validateDiagnosticOptions(options);
+  if (!error.isEmpty()) return error;
+  const auto bundle = QDir::cleanPath(options.bundleDirectory);
+  if (!isSafeRelativePath(options.bundleDirectory, false) || bundle == "deploy" || bundle.startsWith("deploy/"))
+    return "Choose a new bundle directory beneath the project root, outside deploy/.";
+  if (options.validationInputs.isEmpty()) return "Add representative raw parquet validation recordings.";
+  for (const auto &input : options.validationInputs)
+    if (!isSafeRelativePath(input, false)) return "Validation recordings must stay beneath the remote project root.";
+  if (!options.ecg3SourceConfirmed) return "Confirm training uses ECG2 − ECG1 for the UART-derived ECG3 channel.";
+  if (options.pythonExecutable.isEmpty() || options.pythonExecutable.contains(QChar::Null) ||
+      options.pythonExecutable.contains('\n') || options.pythonExecutable.contains('\r'))
+    return "Enter the Jetson Python executable.";
+  return {};
+}
+
 QString serviceUnitRepairCommand(bool sudoPasswordProvided) {
   const QString sudoCommand =
       sudoPasswordProvided ? QStringLiteral("sudo -S -p '' --")
@@ -199,16 +243,37 @@ QString serviceUnitRepairCommand(bool sudoPasswordProvided) {
 }
 
 QString prepareModelCommand(const DiagnosticRuntimeOptions &options) {
+  const auto error = validatePreparationOptions(options);
+  if (!error.isEmpty()) return "printf '%s\\n' " + posixShellQuote(error) + " >&2; exit 2";
   QString command =
-      QStringLiteral("./prepare_model.sh %1 --model-dir %2 --variant %3")
+      QStringLiteral("bash ./prepare_model.sh %1 --model-dir %2 --variant %3")
           .arg(posixShellQuote(options.modelName),
                posixShellQuote(QDir::cleanPath(options.modelDirectory)),
                posixShellQuote(options.variant));
-  if (options.preparationMode == QStringLiteral("jetson-only")) {
-    command += QStringLiteral(" --jetson-only");
-  }
+  command += " --jetson-only --prepare-only --output-dir " + posixShellQuote(QDir::cleanPath(options.bundleDirectory));
+  command += " --python " + posixShellQuote(options.pythonExecutable);
+  command += " --max-stream-samples 0 --ecg3-source ecg2_minus_ecg1";
+  for (const auto &input : options.validationInputs)
+    command += " --validation-input " + posixShellQuote(QDir::cleanPath(input));
   if (options.forceRecoveryOff) command += QStringLiteral(" --no-recovery");
   return command;
+}
+
+QString activatePreparedModelCommand(const DiagnosticRuntimeOptions &options) {
+  const auto error = validatePreparationOptions(options);
+  if (!error.isEmpty()) return "printf '%s\\n' " + posixShellQuote(error) + " >&2; exit 2";
+  const auto model = QDir::cleanPath(options.bundleDirectory) + "/model";
+  QString command = "bash run/deploy_model.sh " + posixShellQuote(options.modelName) +
+      " --variant " + posixShellQuote(options.variant) + " --model-dir " + posixShellQuote(model) +
+      " --config " + posixShellQuote(model + "/train_config.json") +
+      " --checkpoint " + posixShellQuote(model + "/best.pth") +
+      " --engine " + posixShellQuote(model + "/model.engine") +
+      " --validated-report " + posixShellQuote(QDir::cleanPath(options.bundleDirectory) + "/validation_report.json") +
+      " --python " + posixShellQuote(options.pythonExecutable);
+  if (options.forceRecoveryOff) command += " --no-recovery";
+  // Recheck activity at execution time as well as in the GUI. The backend
+  // verifies fingerprints and checks the service again before replacing files.
+  return idleDetectorGuard() + command;
 }
 
 QString finishedModelsCommand() {
@@ -245,8 +310,10 @@ done
 QString FinishedModel::predictionDescription() const {
   const auto target = predictionDelayFrames == 1 ? QStringLiteral("Previous-frame primary; 10 ms context")
                                                  : QStringLiteral("Current-frame target");
-  return frameHz > 0 ? QString("%1; %2 Hz; window %3 s").arg(target)
-      .arg(frameHz, 0, 'g', 6).arg(windowFrames / frameHz, 0, 'g', 6) : target;
+  QString description = frameHz > 0 ? QString("%1; %2 Hz; window %3").arg(target)
+      .arg(frameHz, 0, 'g', 6).arg(windowFrames > 0 ? QString::number(windowFrames / frameHz, 'g', 6) + " s" : "unavailable") : target;
+  description += holdoffMs >= 0 ? QString("; holdoff %1 ms").arg(holdoffMs, 0, 'g', 6) : "; holdoff unavailable";
+  return description;
 }
 
 static bool readPredictionContract(const QJsonObject &config, FinishedModel &model) {
@@ -263,6 +330,16 @@ static bool readPredictionContract(const QJsonObject &config, FinishedModel &mod
   const auto hz = config.value("raw_hz").toDouble();
   model.frameHz = size > 0 && hz > 0 ? hz / size : 0;
   model.windowFrames = config.value("window_size").toInt();
+  const auto holdoff = config.value("holdoff_frames");
+  if (model.frameHz > 0) {
+    if (holdoff.isDouble() && holdoff.toDouble() >= 0)
+      model.holdoffMs = std::trunc(holdoff.toDouble()) * 1000.0 / model.frameHz;
+    else if (holdoff.isNull() || holdoff.isUndefined()) {
+      const auto configuredMs = config.value("holdoff_ms");
+      const double ms = configuredMs.isUndefined() ? 200 : configuredMs.toDouble(-1);
+      if (ms >= 0) model.holdoffMs = std::ceil(ms * model.frameHz / 1000.0) * 1000.0 / model.frameHz;
+    }
+  }
   return !expected || (hz == 400 && size == 4 && model.windowFrames >= 2 && !model.recoverySupported &&
       !config.value("recovery_only").toBool(false) &&
       (config.value("recovery_threshold").isNull() || config.value("recovery_threshold").isUndefined()));
@@ -309,15 +386,16 @@ QList<FinishedModel> parseFinishedModels(const QByteArray &output) {
 }
 
 QString prepareStoppedModelCommand(const DiagnosticRuntimeOptions &options) {
-  return QStringLiteral(
-      "service_state=\"$(systemctl is-active %1.service 2>/dev/null || true)\"; "
-      "case \"$service_state\" in inactive|failed) ;; active|activating|reloading|deactivating) "
-      "printf 'Stop the service before preparing a model.\\n' >&2; exit 3;; *) "
-      "test \"$(systemctl show --value -p LoadState %1.service 2>/dev/null || true)\" = not-found || "
-      "{ printf 'Cannot verify that the service is stopped. Check again.\\n' >&2; exit 3; };; esac; "
-      "%2; if test -s \"$pid_file\" && kill -0 \"$(cat -- \"$pid_file\")\" 2>/dev/null; then "
-      "printf 'Stop direct inference before preparing a model.\\n' >&2; exit 3; fi; %3")
-      .arg(QString::fromLatin1(kServiceName), stateVariables(), prepareModelCommand(options));
+  QString command = idleDetectorGuard() + prepareModelCommand(options);
+  if (options.variant == "tuned" && validatePreparationOptions(options).isEmpty()) {
+    // Isolated preparation normalizes the copied tuned config to train_config.json.
+    // Preserve the backend recovery helper's variant-based source lookup without
+    // changing that config or its fingerprint. Create only inside the new bundle.
+    const auto model = QDir::cleanPath(options.bundleDirectory) + "/model";
+    command += " && mkdir -- " + posixShellQuote(model + "/tuning") +
+        " && ln -s -- ../train_config.json " + posixShellQuote(model + "/tuning/tuned_config.json");
+  }
+  return command;
 }
 
 QString reexportModelCommand(const DiagnosticRuntimeOptions &options) {
@@ -419,6 +497,7 @@ printf 'SSH connection successful\n';
 )SH");
   command +=
       QStringLiteral("repo_root=\"$(pwd -P)\"; %1; ").arg(stateVariables());
+  command += serviceSchedulingCheck();
   command += QStringLiteral(
       "service_installed=no; service_active=no; service_enabled=no; "
       "service_unit_present=no; service_linked=no; service_contract=no; "
@@ -461,9 +540,7 @@ printf 'SSH connection successful\n';
           "grep -Fqx -- \"BindReadOnlyPaths=${repo_root}:/opt/dkfz-live\" "
           "%3 && "
           "grep -Fqx -- 'WorkingDirectory=/opt/dkfz-live' %3 && "
-          "grep -Fqx -- 'ExecStart=/opt/dkfz-live/build_native/"
-          "inference/native_uart_live_runtime --config "
-          "/opt/dkfz-live/config/native_uart_live.conf' %3 && "
+          "test \"$scheduling_profile\" != unknown && "
           "grep -Fqx -- 'ReadWritePaths=/var/lib/dkfz-live' %3 && "
           "grep -Eq -- '^[[:space:]]*manifest_path[[:space:]]*="
           "[[:space:]]*deploy/model/model\\.conf[[:space:]]*$' %1 && "
@@ -501,9 +578,10 @@ printf 'SSH connection successful\n';
           "fi; "
           "if test \"$active_model\" = %2 && "
           "test \"$active_variant\" = %3 && "
-          "test \"$active_source\" = %4; then active_selection=yes; fi; ")
+          "{ test \"$active_source\" = %4 || test \"$active_source\" = %5 || "
+          "test \"$active_source\" = \"${repo_root}/\"%5; }; then active_selection=yes; fi; ")
           .arg(posixShellQuote(activeManifest), modelName, variant,
-               modelDirectory);
+               modelDirectory, posixShellQuote(QDir::cleanPath(options.bundleDirectory) + "/model"));
   command += QStringLiteral(
                  "if test -s \"$pid_file\" && "
                  "pid=\"$(cat -- \"$pid_file\")\" && "
@@ -545,6 +623,7 @@ printf 'SSH connection successful\n';
       "printf '__JCG_SERVICE__=%s\\n' \"$service_installed\"; "
       "printf '__JCG_SERVICE_ACTIVE__=%s\\n' \"$service_active\"; "
       "printf '__JCG_SERVICE_STATE__=%s\\n' \"$service_state\"; "
+      "printf '__JCG_SCHEDULING_PROFILE__=%s\\n' \"$scheduling_profile\"; "
       "printf '__JCG_SERVICE_INPUT__=%s\\n' \"$service_input\"; "
       "printf '__JCG_SERVICE_ENABLED__=%s\\n' \"$service_enabled\"; "
       "printf '__JCG_SERVICE_UNIT__=%s\\n' \"$service_unit_present\"; "
@@ -571,7 +650,7 @@ printf 'SSH connection successful\n';
                             "else printf '__JCG_REEXPORT_INPUTS__=no\\n'; fi; ")
                  .arg(preparationInputCheck(complete));
   command += finishedModelsCommand();
-  // Pin the existing deployment for the stop/prepare/validate/start workflow.
+  // Pin the active deployment for a subsequent explicit service start.
   // This reads files only; it never probes an installer or transfers binaries.
   command += QString::fromUtf8(R"SH(
 for entry in MANIFEST:deploy/model/model.conf CONFIG:config/native_uart_live.conf RUNTIME:build_native/inference/native_uart_live_runtime; do
@@ -602,13 +681,12 @@ test "$(systemctl show --value -p NeedDaemonReload "$service")" = no
 test "$(readlink -f -- "$(systemctl show --value -p FragmentPath "$service")")" = "$root/deploy/dkfz-native-uart-live.service"
 test "$(systemctl show --value -p WorkingDirectory "$service")" = /opt/dkfz-live
 test -z "$(systemctl show --value -p RootDirectory "$service")"
-grep -Fqx -- 'ExecStart=/opt/dkfz-live/build_native/inference/native_uart_live_runtime --config /opt/dkfz-live/config/native_uart_live.conf' deploy/dkfz-native-uart-live.service
 binds=$(systemctl show --value -p BindReadOnlyPaths "$service")
 case "$binds" in "$root:/opt/dkfz-live"|"$root:/opt/dkfz-live:rbind"|"$root:/opt/dkfz-live:norbind") ;; *) echo 'Service project changed. Check again.' >&2; exit 1;; esac
 if test -s "$1" && kill -0 "$(cat -- "$1")" 2>/dev/null; then
   echo 'Stop direct inference before deploying a model.' >&2; exit 1
 fi
-)SH");
+)SH") + serviceSchedulingCheck() + "test \"$scheduling_profile\" != unknown\n";
 }
 QString guardedServiceCommand(bool password,const QString &script) {
   const auto sudo = password ? "sudo -S -p '' -- bash -c " : "sudo -n -- bash -c ";

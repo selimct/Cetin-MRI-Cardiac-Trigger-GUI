@@ -29,14 +29,14 @@ RecoveryPanel::RecoveryPanel(RecoveryController *controller, QWidget *parent)
     deployment_->addItem("Recovery off — current output only", true);
     deployment_->setToolTip(
         "Saved settings enable recovery only when the model enables it and has a calibrated threshold. "
-        "Recovery off uses --no-recovery during preparation and keeps both model outputs.");
+        "Recovery off uses --no-recovery during preparation and activation and keeps both model outputs.");
     deploymentLayout->addWidget(deployment_);
     auto *restoreDeployment = new QPushButton("Reset startup selection", deploymentGroup);
     restoreDeployment->setObjectName("restoreRecoveryDeployment");
     deploymentLayout->addWidget(restoreDeployment);
     auto *explanation = new QLabel(
-        "For this same model, choose saved recovery settings or current-only, then use Deploy and start "
-        "(stop, prepare, validate, start). No retraining or additional installation is needed. "
+        "For this same model, choose saved recovery settings or current-only, prepare a new isolated bundle "
+        "while idle, review its evidence and activate it. Starting the service is a separate action. "
         "Saved settings may also disable recovery if calibration selected no threshold. "
         "Changing this selection alone sends no command.",
         deploymentGroup);
@@ -176,7 +176,7 @@ void RecoveryPanel::update()
         summary = s.manifest.values.value("recovery_threshold").isEmpty()
                       ? "Saved startup: recovery off (current output only)."
                       : "Saved startup: recovery on.";
-        summary += " Live switching is unavailable on this stack; use Startup recovery and Deploy and start. "
+        summary += " Live switching is unavailable on this stack; use Startup recovery, isolated preparation and separate activation. "
                    "Active recovery state is unconfirmed.";
     }
     else if (s.api.value("confirmation") != "confirmed" || !active.value("enabled").isBool())

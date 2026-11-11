@@ -177,8 +177,8 @@ void RecoveryController::finished(bool success, const QString &error)
                     QJsonDocument::fromJson(QByteArray::fromBase64(fields.value("API"))).object());
             else
                 state_.warning = "Live recovery unavailable: remote native recovery-control API v1 is absent "
-                                 "or could not be checked. Use the deployment policy and existing stop / "
-                                 "prepare / validate / start workflow.";
+                                 "or could not be checked. Use the startup policy with isolated preparation "
+                                 "and separate activation/service actions.";
             if (!state_.api.isEmpty() &&
                 state_.api.value("source_revision").toString() != state_.sourceRevision)
             {

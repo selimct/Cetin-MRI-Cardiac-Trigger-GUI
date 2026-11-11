@@ -18,6 +18,13 @@ QString number(const QJsonValue &v)
     return v.isDouble() ? QString::number(v.toDouble(), 'g', 12) : "Unavailable";
 }
 QString boolean(const QJsonValue &v) { return v.isBool() ? (v.toBool() ? "yes" : "no") : "Unknown"; }
+QString coordinate(const QJsonValue &v)
+{
+    if (!v.isDouble()) return "Unavailable";
+    const auto integer = v.toInteger();
+    return v.toDouble() == static_cast<double>(integer) ? QString::number(integer)
+                                                       : QString::number(v.toDouble(), 'g', 17);
+}
 QString policy(const QJsonObject &p)
 {
     if (!p.value("enabled").isBool())
@@ -307,10 +314,21 @@ QString telemetryDescription(const QJsonObject &e)
             text += "; previous-frame recovery probability=" + number(e.value("recovery_prob"));
         if (e.value("recovery_emitted_now").isBool())
             text += "; recovery emitted on this record=" + boolean(e.value("recovery_emitted_now"));
+        if (e.value("prediction_delay_frames").toInt() == 1) {
+            text += "; target frame=" + coordinate(e.value("frame_idx_50hz")) +
+                "; observed frame=" + coordinate(e.value("observed_frame_idx")) +
+                "; observed time ms=" + coordinate(e.value("observed_time_ms"));
+        }
         return text;
     }
     if (schema == "dkfz-live-trigger-v1")
         return "accepted event score=" + number(e.value("probability")) +
+               "; candidate frame=" + coordinate(e.value("peak_frame_idx_50hz")) +
+               "; candidate raw sample=" + coordinate(e.value("peak_sample_idx_400hz")) +
+               "; candidate time ms=" + coordinate(e.value("peak_time_ms")) +
+               "; actual emission frame=" + coordinate(e.value("emitted_on_frame_idx_50hz")) +
+               "; actual emission raw sample=" + coordinate(e.value("emitted_on_sample_idx_400hz")) +
+               "; actual emission time ms=" + coordinate(e.value("emitted_on_time_ms")) +
                "; head origin unknown (requires explicit origin or matching probability record)";
     return {};
 }

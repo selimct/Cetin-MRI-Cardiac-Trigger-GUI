@@ -31,6 +31,9 @@ private slots:
   void generatedCommandsParseAsBash();
   void rejectsFilesChangedDuringValidation();
   void preparationChecksTheCurrentServiceState();
+  void rejectsUnsafePreparationInputs();
+  void buildsFingerprintedActivationCommand();
+  void serviceSchedulingProfiles();
 };
 
 void DiagnosticCommandBuilderTest::delayedPredictionDiscovery() {
@@ -53,6 +56,21 @@ void DiagnosticCommandBuilderTest::delayedPredictionDiscovery() {
   QVERIFY(parseFinishedModels(line(config)).isEmpty());
   config["recovery_head"] = false; config["prediction_delay_frames"] = 0;
   QVERIFY(parseFinishedModels(line(config)).isEmpty());
+  config["prediction_delay_frames"] = 1;
+  config["holdoff_frames"] = 4;
+  models = parseFinishedModels(line(config));
+  QVERIFY(models[0].predictionDescription().contains("holdoff 40 ms"));
+  config["prediction_mode"] = "current"; config["prediction_delay_frames"] = 0;
+  config["frame_size_raw"] = 8; config["window_size"] = 50;
+  models = parseFinishedModels(line(config));
+  QVERIFY(models[0].predictionDescription().contains("50 Hz; window 1 s; holdoff 80 ms"));
+  config.remove("holdoff_frames"); config["holdoff_ms"] = 201;
+  models = parseFinishedModels(line(config));
+  QVERIFY(models[0].predictionDescription().contains("holdoff 220 ms"));
+  config["frame_size_raw"] = 4;
+  config["prediction_mode"] = "delayed_100hz"; config["prediction_delay_frames"] = 1;
+  models = parseFinishedModels(line(config));
+  QVERIFY(models[0].predictionDescription().contains("holdoff 210 ms"));
 }
 
 void DiagnosticCommandBuilderTest::validatesParameters() {
@@ -129,15 +147,18 @@ void DiagnosticCommandBuilderTest::buildsPreparationCommand() {
       .modelDirectory = QStringLiteral("models_noCV/target-r"),
       .variant = QStringLiteral("tuned"),
   };
-  QCOMPARE(
-      prepareModelCommand(options),
-      QStringLiteral("./prepare_model.sh 'target-r' --model-dir "
-                     "'models_noCV/target-r' --variant 'tuned' --jetson-only"));
+  options.bundleDirectory = "artifact/bundle 1";
+  options.validationInputs = {"data/one.parquet", "data/two.parquet"};
+  options.ecg3SourceConfirmed = true;
+  const auto command = prepareModelCommand(options);
+  QVERIFY(command.startsWith("bash ./prepare_model.sh 'target-r' --model-dir 'models_noCV/target-r' --variant 'tuned'"));
+  QVERIFY(command.contains("--prepare-only --output-dir 'artifact/bundle 1'"));
+  QVERIFY(command.contains("--ecg3-source ecg2_minus_ecg1"));
+  QVERIFY(command.contains("--validation-input 'data/one.parquet' --validation-input 'data/two.parquet'"));
+  QVERIFY(!command.contains("run/deploy_model.sh"));
 
   options.preparationMode = QStringLiteral("complete");
-  QCOMPARE(prepareModelCommand(options),
-           QStringLiteral("./prepare_model.sh 'target-r' --model-dir "
-                          "'models_noCV/target-r' --variant 'tuned'"));
+  QCOMPARE(prepareModelCommand(options), command);
 }
 
 void DiagnosticCommandBuilderTest::buildsSafeDirectRuntimeCommand() {
@@ -171,10 +192,15 @@ void DiagnosticCommandBuilderTest::buildsReexportCommand() {
       .modelDirectory = QStringLiteral("finished_models/folder with ' quote"),
       .variant = QStringLiteral("tuned"),
   };
-  const auto command = reexportModelCommand(options);
+  auto prepared = options;
+  prepared.bundleDirectory = "artifact/quoted ' bundle";
+  prepared.validationInputs = {"data/recording ' one.parquet", "data/two.parquet"};
+  prepared.ecg3SourceConfirmed = true;
+  const auto command = reexportModelCommand(prepared);
   QVERIFY(command.contains(QStringLiteral("./prepare_model.sh 'declared_name'")));
   QVERIFY(command.contains(QStringLiteral("--variant 'tuned'")));
-  QVERIFY(!command.contains(QStringLiteral("--jetson-only")));
+  QVERIFY(command.contains(QStringLiteral("--prepare-only")));
+  QVERIFY(command.contains(QStringLiteral("--max-stream-samples 0")));
   QVERIFY(!command.contains(QStringLiteral("--engine")));
   QVERIFY(command.contains(QStringLiteral("systemctl is-active")));
   QVERIFY(command.contains(QStringLiteral("native_uart_live_runtime.pid")));
@@ -204,7 +230,7 @@ void DiagnosticCommandBuilderTest::buildsAvailabilityProbe() {
   QVERIFY(command.contains(QStringLiteral("__JCG_FINISHED_MODEL__")));
   QVERIFY(command.contains(QStringLiteral("deploy/model/model.conf")));
   QVERIFY(
-      command.contains(QStringLiteral("models_noCV/target_r/target_r.onnx")));
+      command.contains(QStringLiteral("models_noCV/target_r/best.pth")));
   QVERIFY(
       command.contains(QStringLiteral("deploy/dkfz-native-uart-live.service")));
   QVERIFY(command.contains(QStringLiteral("config/native_uart_live.conf")));
@@ -245,6 +271,9 @@ void DiagnosticCommandBuilderTest::generatedCommandsParseAsBash() {
       .outputMode = QStringLiteral("jsonl"),
       .sessionLogPath = QStringLiteral("output/live session.log"),
       .emitProbabilities = true,
+      .bundleDirectory = "artifact/quoted ' bundle",
+      .validationInputs = {"data/one ' recording.parquet", "data/two.parquet"},
+      .ecg3SourceConfirmed = true,
   };
   const QStringList commands{
       prepareModelCommand(options),       validateRuntimeCommand(options),
@@ -252,6 +281,7 @@ void DiagnosticCommandBuilderTest::generatedCommandsParseAsBash() {
       serviceUnitRepairCommand(false),    serviceUnitRepairCommand(true),
       availabilityProbeCommand(options), rebuildRuntimeCommand(),
       finishedModelsCommand(), reexportModelCommand(options), prepareStoppedModelCommand(options),
+      activatePreparedModelCommand(options),
       deploymentStopCommand(false), deploymentStopCommand(true),
       deploymentStartCommand(false, QString(64,'a'), QString(64,'b'), QString(64,'c')),
   };
@@ -319,6 +349,84 @@ void DiagnosticCommandBuilderTest::preparationChecksTheCurrentServiceState() {
   process.start("bash", {"-c", prepareStoppedModelCommand(options)});
   QVERIFY(process.waitForStarted()); QVERIFY(process.waitForFinished());
   QCOMPARE(process.exitCode(),3); QVERIFY(!QFile::exists(dir.filePath("preparation-was-run")));
+#endif
+}
+
+void DiagnosticCommandBuilderTest::rejectsUnsafePreparationInputs() {
+  DiagnosticRuntimeOptions options{.modelName="heart", .modelDirectory="finished_models/heart",
+      .bundleDirectory="artifact/run", .validationInputs={"data/one.parquet"}, .ecg3SourceConfirmed=true};
+  QVERIFY(validatePreparationOptions(options).isEmpty());
+  options.ecg3SourceConfirmed = false;
+  QVERIFY(!validatePreparationOptions(options).isEmpty());
+  QVERIFY(!prepareModelCommand(options).contains("prepare_model.sh"));
+  QVERIFY(!activatePreparedModelCommand(options).contains("deploy_model.sh"));
+  options.ecg3SourceConfirmed = true;
+  for (const auto &path : {"../outside", "/absolute", "deploy", "artifact/../deploy/run", ""}) {
+    options.bundleDirectory = path;
+    QVERIFY(!validatePreparationOptions(options).isEmpty());
+  }
+  options.bundleDirectory = "artifact/run";
+  options.validationInputs = {"../outside.parquet"};
+  QVERIFY(!validatePreparationOptions(options).isEmpty());
+  options.validationInputs.clear();
+  QVERIFY(!validatePreparationOptions(options).isEmpty());
+}
+
+void DiagnosticCommandBuilderTest::buildsFingerprintedActivationCommand() {
+  DiagnosticRuntimeOptions options{.modelName="delayed", .modelDirectory="finished_models/heart/delayed_100hz",
+      .variant="tuned", .forceRecoveryOff=true, .bundleDirectory="artifact/quoted ' bundle",
+      .validationInputs={"data/one.parquet"}, .ecg3SourceConfirmed=true};
+  const auto command = activatePreparedModelCommand(options);
+  QVERIFY(command.contains("bash run/deploy_model.sh 'delayed' --variant 'tuned'"));
+  for (const auto &path : {"/model/train_config.json", "/model/best.pth", "/model/model.engine", "/validation_report.json"})
+    QVERIFY(command.contains(posixShellQuote(options.bundleDirectory + path)));
+  QVERIFY(command.contains("--validated-report"));
+  QVERIFY(command.contains("--no-recovery"));
+  QVERIFY(command.contains("systemctl is-active"));
+  QVERIFY(!command.contains("systemctl start"));
+  QVERIFY(!command.contains("systemctl stop"));
+}
+
+void DiagnosticCommandBuilderTest::serviceSchedulingProfiles() {
+#ifdef Q_OS_WIN
+  QSKIP("Linux fake host filesystem fixture");
+#else
+  for (const auto &profile : {"legacy", "bounded", "unbounded", "whole-process-rt", "unexpected-flags", "old-runtime"}) {
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const auto write = [&](const QString &path, const QByteArray &bytes, bool executable = false) {
+      const auto full = dir.filePath(path);
+      QVERIFY(QDir().mkpath(QFileInfo(full).absolutePath()));
+      QFile file(full); QVERIFY(file.open(QIODevice::WriteOnly));
+      QCOMPARE(file.write(bytes), bytes.size()); file.close();
+      if (executable) QVERIFY(file.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+    };
+    QByteArray unit = "ExecStart=/opt/dkfz-live/build_native/inference/native_uart_live_runtime --config /opt/dkfz-live/config/native_uart_live.conf";
+    if (QString(profile) != "legacy") unit += " --realtime-priority 20 --require-realtime";
+    if (QString(profile) == "unexpected-flags") unit += " --other-flag";
+    write("deploy/dkfz-native-uart-live.service", unit + '\n');
+    write("profile", profile);
+    write("build_native/inference/native_uart_live_runtime",
+          QString(profile) == "old-runtime" ? "#!/bin/bash\necho old runtime\n" :
+          "#!/bin/bash\necho --realtime-priority --require-realtime\n", true);
+    write("bin/systemctl", R"SH(#!/bin/bash
+if [[ $1 == is-active ]]; then echo inactive; exit 3; fi
+if [[ $1 != show ]]; then exit 1; fi
+case "$*" in
+ *LimitRTPRIO*) echo 20;;
+ *LimitRTTIME*) if [[ $(cat profile) == unbounded ]]; then echo infinity; else echo 200000; fi;;
+ *CPUSchedulingPolicy*) if [[ $(cat profile) == whole-process-rt ]]; then echo 2; else echo 0; fi;;
+ *CPUWeight*|*TimerSlackNSec*) echo 1000;;
+esac
+)SH", true);
+    DiagnosticRuntimeOptions options{.modelName="heart", .modelDirectory="finished_models/heart"};
+    QProcess process; auto env=QProcessEnvironment::systemEnvironment();
+    env.insert("PATH", dir.filePath("bin") + ':' + env.value("PATH")); process.setProcessEnvironment(env);
+    process.setWorkingDirectory(dir.path()); process.start("bash", {"-c", availabilityProbeCommand(options)});
+    QVERIFY(process.waitForStarted()); QVERIFY(process.waitForFinished(10000));
+    QCOMPARE(process.exitCode(), 0);
+    const auto expected = QString(profile) == "legacy" ? "legacy" : QString(profile) == "bounded" ? "bounded_rr20" : "unknown";
+    QVERIFY(process.readAllStandardOutput().contains(QByteArray("__JCG_SCHEDULING_PROFILE__=") + expected));
+  }
 #endif
 }
 

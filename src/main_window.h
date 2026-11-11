@@ -12,6 +12,7 @@ class RecoveryPanel;
 
 #include <QElapsedTimer>
 #include <QMainWindow>
+#include <QMap>
 
 class QCheckBox;
 class QCloseEvent;
@@ -49,7 +50,7 @@ private:
     reexportModel,
     rebuildRuntime,
     directInference,
-    deployWorkflow,
+    activateModel,
   };
 
   struct RemoteCapabilities {
@@ -87,8 +88,7 @@ private:
   void runCommand(const QString &label, const QString &command,
                   TaskKind kind = TaskKind::ordinary);
   void stopDirectInference();
-  void deployAndStart();
-  void nextDeploymentStep(bool success);
+  void invalidatePreparedBundle();
   void appendConsole(const QString &text, const QColor &color);
   void appendConsoleBytes(const QByteArray &data, const QColor &color);
   void appendClassifiedConsoleBytes(QByteArray &pending,
@@ -121,12 +121,10 @@ private:
   QByteArray controlStandardOutputDisplayBuffer_;
   QByteArray controlStandardErrorDisplayBuffer_;
   RemoteCapabilities capabilities_;
-  enum class DeploymentStep { none, preflight, stop, prepare, validate, start };
-  DeploymentStep deploymentStep_{DeploymentStep::none};
-  DiagnosticRuntimeOptions deploymentOptions_;
   QString observedManifestRevision_, observedConfigRevision_, observedRuntimeRevision_;
   bool primaryReadbackPending_{false};
-  QString deploymentRevision_, deploymentConfigRevision_, deploymentRuntimeRevision_;
+  bool bundlePrepared_{false};
+  QMap<QString, QString> workerScheduling_;
 
   QLineEdit *hostEdit_{nullptr};
   QLineEdit *userEdit_{nullptr};
@@ -168,7 +166,16 @@ private:
   QPushButton *diagnosticCheckButton_{nullptr};
   QPushButton *prepareModelButton_{nullptr};
   QPushButton *reexportModelButton_{nullptr};
-  QPushButton *deployAndStartButton_{nullptr};
+  QPushButton *activateModelButton_{nullptr};
+  QLineEdit *bundleDirectoryEdit_{nullptr};
+  QLineEdit *pythonExecutableEdit_{nullptr};
+  QPlainTextEdit *validationInputsEdit_{nullptr};
+  QCheckBox *ecg3SourceCheck_{nullptr};
+  QCheckBox *qualificationCheck_{nullptr};
+  QLabel *preparationStateLabel_{nullptr};
+  QLabel *activationStateLabel_{nullptr};
+  QLabel *workerSchedulingLabel_{nullptr};
+  QLabel *runtimeTimingLabel_{nullptr};
   QPushButton *validateRuntimeButton_{nullptr};
   QPushButton *startInferenceButton_{nullptr};
   QPushButton *stopInferenceButton_{nullptr};

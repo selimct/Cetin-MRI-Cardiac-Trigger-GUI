@@ -8,6 +8,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QLineEdit>
+#include <QLabel>
 #include <QPushButton>
 #include <QTemporaryDir>
 #include <QTest>
@@ -36,7 +37,7 @@ QPushButton *button(MainWindow &window, const QString &text) {
 class ModelDeploymentTest final : public QObject {
   Q_OBJECT
 private slots:
-  void selectsAndReexportsOnlyOnExplicitActions() {
+  void selectsPublishedModelsWithoutRemoteMutation() {
 #ifdef Q_OS_WIN
     QSKIP("Fake Linux SSH host requires bash and python3");
 #else
@@ -77,7 +78,7 @@ private slots:
     writeFile(dir.filePath("finished_models/heart/frozen_recovery/best.pth"), "published");
     writeFile(dir.filePath("finished_models/heart_legacy_recovery/train_config.json"), "{\"modelname\":\"heart_legacy_recovery\",\"recovery_head\":true}");
     writeFile(dir.filePath("finished_models/heart_legacy_recovery/best.pth"), "published");
-    writeFile(dir.filePath("finished_models/z_normal/train_config.json"), "{\"modelname\":\"misleading_recovery\"}");
+    writeFile(dir.filePath("finished_models/z_normal/train_config.json"), "{\"modelname\":\"misleading_recovery\",\"raw_hz\":400,\"frame_size_raw\":8,\"window_size\":50,\"holdoff_frames\":4}");
     writeFile(dir.filePath("finished_models/z_normal/best.pth"), "published");
     writeFile(dir.filePath("finished_models/z_normal/delayed_100hz/train_config.json"),
         "{\"modelname\":\"z_normal_delayed_100hz\",\"prediction_mode\":\"delayed_100hz\",\"prediction_delay_frames\":1,\"raw_hz\":400,\"frame_size_raw\":4,\"window_size\":100}");
@@ -113,7 +114,7 @@ printf 'model_name=%s\nsource_model_dir=%s\nmodel_variant=%s\n' "$1" "$3" "$5" >
     auto *directory = window.findChild<QLineEdit *>("modelDirectory");
     auto *variant = window.findChild<QComboBox *>("modelVariant");
     auto *start = button(window, "Start direct inference");
-    auto *prepare = button(window, "Prepare + activate model");
+    auto *prepare = button(window, "Prepare isolated bundle");
     auto *check = button(window, "Check availability");
     QVERIFY(models && refresh && reexport && name && directory && variant && start && prepare && check);
     auto *recoveryPolicy=window.findChild<QComboBox *>("recoveryDeploymentPolicy");
@@ -139,9 +140,13 @@ printf 'model_name=%s\nsource_model_dir=%s\nmodel_variant=%s\n' "$1" "$3" "$5" >
     QVERIFY(QMetaObject::invokeMethod(models, "activated", Q_ARG(int, 8)));
     QCOMPARE(name->text(), QString("z_normal_delayed_100hz"));
     QCOMPARE(directory->text(), QString("finished_models/z_normal/delayed_100hz"));
+    auto *timing = window.findChild<QLabel *>("trainedPredictionContract");
+    QVERIFY(timing);
+    QVERIFY(timing->text().contains("100 Hz; window 1 s; holdoff 200 ms"));
     QVERIFY(!recoveryPolicy->isEnabled());
     models->setCurrentIndex(7);
     QVERIFY(QMetaObject::invokeMethod(models, "activated", Q_ARG(int, 7)));
+    QVERIFY(timing->text().contains("50 Hz; window 1 s; holdoff 80 ms"));
     QVERIFY(!recoveryPolicy->isEnabled());
     models->setCurrentIndex(2);
     QVERIFY(QMetaObject::invokeMethod(models, "activated", Q_ARG(int, 2)));
@@ -152,53 +157,9 @@ printf 'model_name=%s\nsource_model_dir=%s\nmodel_variant=%s\n' "$1" "$3" "$5" >
     QTest::qWait(200);
     QCOMPARE(readFile(dir.filePath("ssh.calls")), beforeSelection);
     QVERIFY(!reexport->isEnabled());
-    check->click();
-    QTRY_VERIFY_WITH_TIMEOUT(reexport->isEnabled(), 5000);
-    QVERIFY(!prepare->isEnabled()); // Existing-ONNX mode cannot work yet.
-    QVERIFY(!start->isEnabled());
-    recoveryPolicy->setCurrentIndex(1); // Explicit deployment draft only.
-    reexport->click();
-    QTRY_VERIFY_WITH_TIMEOUT(refresh->isEnabled(), 5000);
-    QVERIFY(!start->isEnabled());
-    const auto afterReexport = readFile(dir.filePath("ssh.calls"));
-    QTest::qWait(150);
-    QCOMPARE(readFile(dir.filePath("ssh.calls")), afterReexport);
-    check->click();
-    QTRY_VERIFY_WITH_TIMEOUT(start->isEnabled(), 5000); // Only the explicit Check refreshes readiness.
-    QCOMPARE(readFile(dir.filePath("prepare.args")),
-             "declared_name\n--model-dir\n" + source.toUtf8() + "\n--variant\ntuned\n--no-recovery\n");
-    QVERIFY(readFile(dir.filePath("validations")).contains("--check-engine"));
-    QCOMPARE(models->currentIndex(), 2);
-
-    // Existing-ONNX preparation forwards the same policy without a Python
-    // discovery dependency. Complete preparation was exercised above.
-    writeFile(dir.filePath(source + "/declared_name_best_tuned.onnx"), "onnx");
-    check->click();
-    QTRY_VERIFY_WITH_TIMEOUT(prepare->isEnabled(), 5000);
-    prepare->click();
-    QTRY_VERIFY_WITH_TIMEOUT(refresh->isEnabled(), 5000);
-    QCOMPARE(readFile(dir.filePath("prepare.args")),
-             "declared_name\n--model-dir\n" + source.toUtf8() + "\n--variant\ntuned\n--jetson-only\n--no-recovery\n");
-    check->click();
-    QTRY_VERIFY_WITH_TIMEOUT(reexport->isEnabled(), 5000);
-
-    // A running service prevents export, even after a stale successful check.
-    writeFile(dir.filePath("service-state"), "active\n");
-    QFile::remove(dir.filePath("prepare.args"));
-    reexport->click();
-    QTRY_VERIFY_WITH_TIMEOUT(refresh->isEnabled(), 5000);
-    QVERIFY(!QFile::exists(dir.filePath("prepare.args")));
-    QVERIFY(!start->isEnabled());
-
-    // Failed export leaves readiness invalid and never queues a follow-up check.
-    writeFile(dir.filePath("service-state"), "inactive\n");
-    check->click();
-    QTRY_VERIFY_WITH_TIMEOUT(reexport->isEnabled(), 5000);
-    writeFile(dir.filePath("fail-export"), "fail");
-    reexport->click();
-    QTRY_VERIFY_WITH_TIMEOUT(refresh->isEnabled(), 5000);
-    QVERIFY(!start->isEnabled());
-    QVERIFY(!reexport->isEnabled());
+    QVERIFY(!prepare->isEnabled());
+    QVERIFY(!window.findChild<QPushButton *>("activatePreparedBundle")->isEnabled());
+    QVERIFY(!window.findChild<QPushButton *>("deployAndStart"));
 #endif
   }
 };

@@ -295,11 +295,13 @@ class RecoveryTest final : public QObject
     void preparationAndTelemetrySemantics()
     {
         DiagnosticRuntimeOptions options{
-            .modelName = "heart", .modelDirectory = "finished_models/heart/recovery", .forceRecoveryOff = true};
-        QVERIFY(prepareModelCommand(options).endsWith("--jetson-only --no-recovery"));
+            .modelName = "heart", .modelDirectory = "finished_models/heart/recovery", .forceRecoveryOff = true,
+            .bundleDirectory = "artifact/test-bundle", .validationInputs = {"data/one.parquet"}, .ecg3SourceConfirmed = true};
+        QVERIFY(prepareModelCommand(options).endsWith("--no-recovery"));
+        QVERIFY(prepareModelCommand(options).contains("--prepare-only"));
         options.preparationMode = "complete";
-        QVERIFY(prepareModelCommand(options).endsWith("--variant 'best' --no-recovery"));
-        QVERIFY(reexportModelCommand(options).endsWith("--no-recovery"));
+        QVERIFY(prepareModelCommand(options).endsWith("--no-recovery"));
+        QVERIFY(reexportModelCommand(options).contains("--no-recovery"));
         options.forceRecoveryOff = false;
         QVERIFY(!prepareModelCommand(options).contains("--no-recovery"));
         const QJsonObject delayed{{"schema", "dkfz-live-probability-v1"},
