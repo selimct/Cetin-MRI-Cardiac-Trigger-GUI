@@ -52,6 +52,7 @@ if [[ $last == *__JCG_SERVICE__* ]]; then
 elif [[ $last == *__SERVICE_STATE__* ]]; then
  # Quick check mode - return simplified output
  echo "__SERVICE_STATE__=active"
+ echo "__SERVICE_ACTIVE__=yes"
  echo "__MODEL_READY__=yes"
  echo "__ACTIVE_MODEL__=test-model"
  echo "__ACTIVE_VARIANT__=best"

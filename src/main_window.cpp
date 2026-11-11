@@ -1307,8 +1307,8 @@ void MainWindow::applyAvailabilityProbe(const QByteArray &output) {
   if (isQuickCheck) {
     // Handle quick check output - simplified capability flags
     capabilities_.service = output.contains("__SERVICE_STATE__");
+    capabilities_.serviceActive = present("__SERVICE_ACTIVE__");
     capabilities_.manifest = present("__MODEL_READY__");
-    capabilities_.serviceActive = false;
     capabilities_.serviceEnabled = false;
     capabilities_.serviceUnit = false;
     capabilities_.serviceLinkedToCheckout = false;
@@ -1391,34 +1391,42 @@ void MainWindow::applyAvailabilityProbe(const QByteArray &output) {
           QStringLiteral(" Input is usable and processing is running."));
     }
   } else if (capabilities_.service) {
-    QStringList reasons;
-    if (!capabilities_.serviceLinkedToCheckout) {
-      reasons.append(QStringLiteral(
-          "the installed unit is not linked to this checkout's deploy unit"));
-    }
-    if (!capabilities_.serviceContract) {
-      reasons.append(QStringLiteral(
-          "the bind path/account/groups/state directory/config sandbox is "
-          "invalid, or systemd needs daemon-reload"));
-    }
-    if (!capabilities_.runtime || !capabilities_.serviceConfig ||
-        !capabilities_.manifest || !capabilities_.engine ||
-        !capabilities_.activeSlotMetadata) {
-      reasons.append(QStringLiteral(
-          "the runtime, service config, or deploy/model slot is incomplete"));
-    }
-    if (reasons.isEmpty()) {
-      reasons.append(QStringLiteral("runtime or engine validation failed"));
-    }
-    serviceAvailabilityLabel_->setText(
-        QStringLiteral("The unit is installed but %1. Start and Restart "
-                       "remain disabled.")
-            .arg(reasons.join(QStringLiteral("; "))));
-    if (!capabilities_.serviceLinkedToCheckout && capabilities_.serviceUnit && !isQuickCheck) {
+    if (isQuickCheck) {
+      // For quick check, show simplified status without detailed validation
       serviceAvailabilityLabel_->setText(
-          serviceAvailabilityLabel_->text() +
-          QStringLiteral(
-              " Stop the service, then select Install / repair unit link."));
+          QStringLiteral("The systemd service is %1. Quick check completed - select Check for detailed validation.")
+              .arg(capabilities_.serviceState));
+    } else {
+      // Full probe - show detailed validation results
+      QStringList reasons;
+      if (!capabilities_.serviceLinkedToCheckout) {
+        reasons.append(QStringLiteral(
+            "the installed unit is not linked to this checkout's deploy unit"));
+      }
+      if (!capabilities_.serviceContract) {
+        reasons.append(QStringLiteral(
+            "the bind path/account/groups/state directory/config sandbox is "
+            "invalid, or systemd needs daemon-reload"));
+      }
+      if (!capabilities_.runtime || !capabilities_.serviceConfig ||
+          !capabilities_.manifest || !capabilities_.engine ||
+          !capabilities_.activeSlotMetadata) {
+        reasons.append(QStringLiteral(
+            "the runtime, service config, or deploy/model slot is incomplete"));
+      }
+      if (reasons.isEmpty()) {
+        reasons.append(QStringLiteral("runtime or engine validation failed"));
+      }
+      serviceAvailabilityLabel_->setText(
+          QStringLiteral("The unit is installed but %1. Start and Restart "
+                         "remain disabled.")
+              .arg(reasons.join(QStringLiteral("; "))));
+      if (!capabilities_.serviceLinkedToCheckout && capabilities_.serviceUnit) {
+        serviceAvailabilityLabel_->setText(
+            serviceAvailabilityLabel_->text() +
+            QStringLiteral(
+                " Stop the service, then select Install / repair unit link."));
+      }
     }
   } else {
     serviceAvailabilityLabel_->setText(
