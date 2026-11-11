@@ -63,7 +63,7 @@ elif [[ $last == *journalctl* ]]; then
 fi
 )SH", true);
     MainWindow window({.host="fake", .remoteDirectory=dir.path()});
-    auto *check = button(window, "Check availability");
+    auto *check = button(window, "Quick check");
     auto *logs = button(window, "Follow log");
     check->click();
     QTRY_VERIFY_WITH_TIMEOUT(logs->isEnabled(), 5000);

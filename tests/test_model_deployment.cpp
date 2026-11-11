@@ -115,7 +115,7 @@ printf 'model_name=%s\nsource_model_dir=%s\nmodel_variant=%s\n' "$1" "$3" "$5" >
     auto *variant = window.findChild<QComboBox *>("modelVariant");
     auto *start = button(window, "Start direct inference");
     auto *prepare = button(window, "Prepare isolated bundle");
-    auto *check = button(window, "Check availability");
+    auto *check = button(window, "Quick check");
     QVERIFY(models && refresh && reexport && name && directory && variant && start && prepare && check);
     auto *recoveryPolicy=window.findChild<QComboBox *>("recoveryDeploymentPolicy");
     QVERIFY(recoveryPolicy);

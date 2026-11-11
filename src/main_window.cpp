@@ -167,9 +167,12 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   connectionOuterLayout->addLayout(connectionLayout);
   connectionOuterLayout->addWidget(acceptNewHostKeyCheck_);
 
-  probeButton_ = new QPushButton(QStringLiteral("Check availability"), central);
+  probeButton_ = new QPushButton(QStringLiteral("Quick check"), central);
   probeButton_->setToolTip(QStringLiteral(
-      "Run the availability check for the currently entered settings."));
+      "Run a quick availability check (SSH connection, service state, model files)."));
+  fullProbeButton_ = new QPushButton(QStringLiteral("Full check"), central);
+  fullProbeButton_->setToolTip(QStringLiteral(
+      "Run the complete availability probe with all validations (service contract, runtime, config, manifest, engine, scheduling)."));
   connectionCheckButton_ =
       makeActionButton(QStringLiteral("Check"), connectionDialog);
   connectionCheckButton_->setToolTip(QStringLiteral(
@@ -500,6 +503,7 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   auto *topActions = new QHBoxLayout;
   topActions->addStretch();
   topActions->addWidget(probeButton_);
+  topActions->addWidget(fullProbeButton_);
   topActions->addWidget(connectionButton);
   mainLayout->addLayout(topActions);
   mainLayout->addWidget(operationsTabs_);
@@ -531,6 +535,8 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
 
   connect(probeButton_, &QPushButton::clicked, this,
           &MainWindow::checkAvailability);
+  connect(fullProbeButton_, &QPushButton::clicked, this,
+          &MainWindow::runFullAvailabilityProbe);
   connect(connectionCheckButton_, &QPushButton::clicked, this,
           &MainWindow::checkAvailability);
   connect(diagnosticCheckButton_, &QPushButton::clicked, this,
@@ -1261,8 +1267,25 @@ void MainWindow::checkAvailability() {
   diagnosticAvailabilityLabel_->setText(
       QStringLiteral("Checking direct-runtime availability…"));
   // Use quick check instead of full probe for faster response
-  runCommand(QStringLiteral("Availability check"),
+  runCommand(QStringLiteral("Quick check"),
              quickAvailabilityCheck(options), TaskKind::availabilityProbe);
+}
+
+void MainWindow::runFullAvailabilityProbe() {
+  if (runner_.isRunning() || controlRunner_.isRunning() || thresholds_.blocking() || recovery_.blocking()) return;
+  const DiagnosticRuntimeOptions options = diagnosticOptions();
+  const QString error = validateDiagnosticOptions(options);
+  if (!error.isEmpty()) {
+    appendConsole(QStringLiteral("Error: %1\n").arg(error), elevatedColor());
+    statusLabel_->setText(error);
+    return;
+  }
+  serviceAvailabilityLabel_->setText(
+      QStringLiteral("Running full availability probe…"));
+  diagnosticAvailabilityLabel_->setText(
+      QStringLiteral("Running full availability probe…"));
+  runCommand(QStringLiteral("Full availability probe"),
+             availabilityProbeCommand(options), TaskKind::availabilityProbe);
 }
 
 void MainWindow::invalidateAvailability() {
@@ -1571,6 +1594,7 @@ void MainWindow::updateActionAvailability() {
   sudoPasswordEdit_->setEnabled(!anyBusy);
   acceptNewHostKeyCheck_->setEnabled(!anyBusy);
   probeButton_->setEnabled(!anyBusy);
+  fullProbeButton_->setEnabled(!anyBusy);
   connectionCheckButton_->setEnabled(!anyBusy);
   healthButton_->setEnabled(!anyBusy);
 
