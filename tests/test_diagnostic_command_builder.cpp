@@ -34,6 +34,7 @@ private slots:
   void rejectsUnsafePreparationInputs();
   void buildsFingerprintedActivationCommand();
   void serviceSchedulingProfiles();
+  void automaticInstallationKeepsValidationAndSeparateServiceStart();
 };
 
 void DiagnosticCommandBuilderTest::delayedPredictionDiscovery() {
@@ -282,6 +283,7 @@ void DiagnosticCommandBuilderTest::generatedCommandsParseAsBash() {
       availabilityProbeCommand(options), rebuildRuntimeCommand(),
       finishedModelsCommand(), reexportModelCommand(options), prepareStoppedModelCommand(options),
       activatePreparedModelCommand(options),
+      installModelCommand(options),
       deploymentStopCommand(false), deploymentStopCommand(true),
       deploymentStartCommand(false, QString(64,'a'), QString(64,'b'), QString(64,'c')),
   };
@@ -428,6 +430,31 @@ esac
     QVERIFY(process.readAllStandardOutput().contains(QByteArray("__JCG_SCHEDULING_PROFILE__=") + expected));
   }
 #endif
+}
+
+void DiagnosticCommandBuilderTest::automaticInstallationKeepsValidationAndSeparateServiceStart() {
+  DiagnosticRuntimeOptions options{.modelName="heart", .modelDirectory="finished_models/heart",
+      .bundleDirectory="build_native/prepared_models/gui-run", .ecg3SourceConfirmed=true,
+      .autoValidationInputs=true};
+  QVERIFY(validatePreparationOptions(options).isEmpty());
+  const auto command = installModelCommand(options);
+  QVERIFY(command.contains("data/live/p12/p12_out.parquet"));
+  QVERIFY(command.contains("data/live/p13/p13_out.parquet"));
+  QVERIFY(command.contains("No standard parity recordings found"));
+  QVERIFY(command.contains("--prepare-only"));
+  QVERIFY(command.contains("--validated-report"));
+  QVERIFY(command.contains("|| exit $?"));
+  QVERIFY(command.indexOf("__JCG_INSTALL_STAGE__=preparation") < command.indexOf("__JCG_INSTALL_STAGE__=activation"));
+  QVERIFY(command.indexOf("__JCG_INSTALL_STAGE__=activation") < command.indexOf("__JCG_INSTALL_STAGE__=verification"));
+  QVERIFY(!command.contains("systemctl start"));
+  QVERIFY(!command.contains("systemctl stop"));
+  const auto bash = QStandardPaths::findExecutable("bash");
+  if (!bash.isEmpty()) {
+    QProcess process;
+    process.start(bash, {"-n"}); QVERIFY(process.waitForStarted());
+    process.write(command.toUtf8()); process.closeWriteChannel();
+    QVERIFY(process.waitForFinished()); QCOMPARE(process.exitCode(), 0);
+  }
 }
 
 QTEST_APPLESS_MAIN(DiagnosticCommandBuilderTest)

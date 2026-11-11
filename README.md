@@ -37,41 +37,39 @@ local live-stack checkout. `remote_directory` is the existing remote project roo
 For normal use:
 
 1. Open **Connection**, enter SSH settings, and press **Check** or **Enter**.
-2. Select a published model from **Finished models** and choose its persistent
-   startup recovery policy. Selection sends no command.
-3. With the detector already idle, enter a **new bundle directory** outside
-   `deploy/`, the Jetson Python executable, and representative raw parquet
-   **Validation recordings**, one path per line. Confirm that training used
-   **ECG3 = ECG2 − ECG1**, as derived by the UART runtime after offset removal.
-4. Select **Prepare isolated bundle**. This runs `--prepare-only`, repeats
-   `--validation-input`, and uses `--max-stream-samples 0` for full recordings.
-   Both 50 Hz and delayed 100 Hz use saved PTH weights to rebuild ONNX and
-   TensorRT on the target. Preparation never stops or starts the service.
-5. Inspect the bundle's `validation_report.json`, numerical and stream logs,
-   and positive event coverage. Independently review accuracy, sustained
-   processing and physical timing. A preparation pass only establishes the
-   backend's equivalence and inference-only timing checks.
-6. Acknowledge acceptance of that independent qualification, select **Check**,
-   then **Activate prepared bundle**. Activation passes the prepared config,
-   checkpoint, engine and fingerprinted report to `run/deploy_model.sh`.
-   It installs files without starting the service.
-7. Select **Check**, review hardware confirmation, then use the separate
-   **Start** action only when physical operation is intended.
+2. Select a model from **Finished models**, choose the startup recovery policy,
+   and confirm the trained **ECG3 = ECG2 − ECG1** input definition.
+3. With the detector already stopped, click **Install selected model**.
+4. When **Installed — ready to start** appears, review the existing hardware
+   confirmation and click **Start**. No additional preparation, activation or
+   Check action is needed.
 
-Preparation, activation and observed service process state have separate status
-labels. Successful preparation never marks accuracy or sustained performance
-verified. Editing the model, bundle, recordings, Python executable, ECG-source
-confirmation or recovery policy clears preparation eligibility and qualification
-acknowledgement. A fresh preparation uses a new directory; failed evidence is
-retained. Existing prepared bundles cannot be imported into a new GUI session.
-The GUI delegates report fingerprints and final activation checks to the backend.
+Installation takes the saved PTH and its matching configuration, builds ONNX
+and TensorRT on the Jetson, validates conversion, installs the checked engine
+and manifest, then checks service readiness. It never starts or stops the
+service. Preparation, activation and running state still have distinct readouts.
+A conversion pass does not establish accuracy or sustained real-time performance.
 
-To persist recovery off and back on for the **same two-output model**, prepare
-and review a new bundle with the desired startup policy, activate it while idle,
-then restart separately when intended. Off forwards `--no-recovery` to both
-preparation and activation. Saved settings omit the flag and respect source
-defaults, including a disabled policy or null threshold. Both preserve
-`recovery_head=true`; neither changes source weights or configuration.
+Working directories are automatic and unique, under
+`build_native/prepared_models/gui-<model>-<time>-<uuid>/`. These contain exact
+source copies, generated artifacts, logs and the fingerprinted validation report;
+you do not need to name or manage them to install a model. Keep them for saved
+source readback and troubleshooting. Reinstallation creates a new directory.
+
+Validation recordings are recorded raw ECG replayed to check that conversion
+preserves probabilities and trigger coordinates. They are not used to retrain
+or tune the model. Installation automatically uses whichever standard fixtures
+exist at `data/live/p12/p12_out.parquet` and `data/live/p13/p13_out.parquet`.
+If neither exists, installation stops before activation and explains what is
+missing. **Advanced model installation** lets you override these paths, one
+remote parquet per line, and the Jetson Python executable. It also contains
+optional manual Prepare/Activate controls. These settings are collapsed normally.
+
+To persist recovery off or back on for the **same two-output model**, choose its
+startup policy and click **Install selected model** while idle, then start when
+intended. Off forwards `--no-recovery` to preparation and activation. Saved
+settings respect disabled source defaults and null calibration. Both preserve
+`recovery_head=true` without changing source weights or configuration.
 
 For a live change on a service that supports the existing native recovery API,
 use **Detector controls → Live recovery override**. Leave **Keep selected
@@ -82,13 +80,14 @@ Selecting a model or editing a draft sends no SSH commands. Apply, preparation, 
 service start and restart do not schedule status refreshes. Check and Enter read
 the current deployment plus recovery and primary policies once; the individual
 Refresh buttons read their respective state. There is no periodic polling.
-Preparation and activation never schedule service actions. Check/Refresh/Enter
-reads runtime policy confirmation explicitly.
+Install performs its final readiness check as part of that explicit action.
+It never schedules a service action. Check/Refresh/Enter reads runtime policy
+confirmation explicitly.
 
 The GUI does not copy or install runtime binaries. It uses only the remote
 stack's existing commands and configuration. Live controls are available only
 when that stack already exposes a supported recovery API and matching readback;
-otherwise use the startup choice and separate idle preparation, activation and service actions. Missing live
+otherwise choose the startup policy, install the model while idle, then start separately. Missing live
 support is never presented as a requirement to install something through the GUI.
 
 Model preparation requires the updated backend's isolated export/parity tools.
@@ -160,9 +159,9 @@ file, but runtime, config, manifest, and engine changes need only a service
 restart. The GUI cannot prove electrical safety.
 
 The first tab, **Installed service**, also contains the **Finished models**
-selector, **Refresh models**, isolated preparation inputs and the separate
-**Prepare isolated bundle** and **Activate prepared bundle** buttons.
-Model selection stays local until you select **Check availability**.
+selector, **Refresh models** and **Install selected model**. Advanced conversion
+settings and manual preparation/activation are collapsed. Model selection alone
+sends no SSH command.
 
 The preflight accepts both the original unit and the bounded worker profile:
 `--realtime-priority 20 --require-realtime`, loaded `LimitRTPRIO=20`, hard/soft
@@ -217,8 +216,8 @@ locally. Select **Check** to query the Jetson for that selection.
 The GUI reads its model name, variant, and source directory and prevents direct
 Start when they do not match the current selection. Model preparation is
 disabled while the service is active, activating, reloading, or deactivating,
-matching `run/deploy_model.sh`; use Stop, prepare and activate the selected
-model, select **Check**, then Start the service.
+matching `run/deploy_model.sh`. Stop the service when intended, select the model,
+then Install. The final readiness check is automatic; Start remains separate.
 
 Direct inference defaults to `none`. GPIO-capable modes cannot start until the
 hardware safety checkbox is selected. An empty raw-capture field explicitly
@@ -306,8 +305,8 @@ Saved files and successful requests are never treated as active confirmation.
 Choose **Use saved recovery settings** or **Recovery off — current output only** in the recovery deployment section. This is a preparation
 setting beside model selection: isolated preparation and activation forward `--no-recovery`
 when selected. Restoring the saved deployment selection only edits that draft.
-Prepare a new bundle, review its evidence, activate it while idle and start
-the service separately when intended. Omitting the flag
+Use **Install selected model** while idle, then start the service separately
+when intended. Omitting the flag
 respects disabled source defaults and null calibration; there is no preparation
 flag to force recovery on, and no training JSON is rewritten. Preparation/export
 itself retains the backend's existing environment requirements described above.

@@ -26,13 +26,26 @@ from a trigger's probability alone. A null timestamp stays unavailable.
 
 ## Deployment contract
 
-Preparation always uses `--jetson-only --prepare-only`, a new `--output-dir`,
-representative repeated `--validation-input` arguments, full recordings via
+The normal action is **Install selected model**: prepare, activate and verify
+service readiness as one command sequence under the GUI deployment lock. The
+service must already be idle and remains stopped. Success needs no additional
+Check before Start (the existing hardware confirmation still applies). A failed
+stage prevents subsequent stages; readiness failure after activation is reported
+as unconfirmed rather than claiming the service is ready.
+
+The GUI names a fresh working directory under `build_native/prepared_models/`
+using model identity, UTC time and a UUID. Preparation uses
+`--jetson-only --prepare-only`, repeated `--validation-input`, full recordings via
 `--max-stream-samples 0`, and confirmed `--ecg3-source ecg2_minus_ecg1`.
-Both rates require the confirmation and recordings in this GUI. Paths are
-relative to the remote checkout; shell quoting preserves spaces and apostrophes.
-The backend checks resolved paths and refuses an existing/deploy output tree.
-There is no fallback to implicit activation on older runtimes.
+Both rates retain the confirmation and recording checks. Empty advanced recording
+settings automatically use existing standard raw fixtures at
+`data/live/p12/p12_out.parquet` and `data/live/p13/p13_out.parquet`. At least one
+must exist; there is no silent omission of stream validation. If the host uses a
+different layout, configure explicit paths in the collapsed advanced section.
+Overrides apply in the current session. Paths are relative to the remote checkout;
+shell quoting preserves spaces and apostrophes. The backend validates file
+contents and refuses an existing/deploy output tree. No fallback to the old
+implicit prepare/activate command occurs.
 
 Preparation checks numerical and causal-stream equivalence and inference-only
 timing. It does not establish accuracy, sustained performance, physical UART
@@ -41,21 +54,22 @@ Inspect event counts: probability coverage without emitted beats does not prove
 positive-event coverage. Accuracy review must use matching annotations and the
 appropriate metric schema; no training, tuning or annotation editing occurs here.
 
-Activation requires successful preparation in the current GUI session and an
-operator acknowledgement of independent qualification. It passes the exact
-bundle config, checkpoint, engine and `--validated-report` to the backend, along
-with the selected variant and recovery policy. Fingerprint verification belongs
-to the backend and is repeated there before replacement. Changing preparation
-inputs clears GUI eligibility. The GUI does not parse reports into an accuracy
-certificate, import older bundles, run paced qualification, or measure hardware.
-The acknowledgement records operator intent in memory, not an audited approval.
+Activation runs automatically after successful preparation during installation.
+It passes the exact config, checkpoint, engine and `--validated-report` to the
+backend, with the selected variant and recovery policy. Fingerprint verification
+belongs to the backend and is repeated before replacement. Manual Prepare and
+Activate controls remain in the advanced section for diagnostics; editing inputs
+clears manual activation eligibility. Neither flow claims accuracy certification,
+runs paced qualification, measures hardware or imports an older prepared bundle.
+The GUI keeps successful and failed working directories for evidence/source
+readback; cleanup is manual. It never rewrites source weights or annotations.
 
 Preparation and activation recheck idle service/direct-process state at execution
 time and share the GUI deployment lock with policy writes. They never stop or
 start the service. The backend additionally checks for concurrent GPU work.
 External tools must honor the runtime's guards/locks; the GUI cannot serialize
 uncooperative external writers. A cancelled SSH command can leave remote work or
-partial evidence; check the host before retrying, using a new bundle directory.
+partial evidence; check the host before retrying. Each installation chooses a new directory.
 Service Start pins manifest/config/runtime revisions; Restart retains the
 existing explicit service action and needs a fresh readiness/hardware check.
 
@@ -103,8 +117,10 @@ ctest --test-dir build --output-on-failure -j 4
 
 Qt tests use temporary fake SSH/systemd/runtime endpoints. They cover model
 discovery and identity, 50/100 Hz physical timing, preparation arguments,
-validation recordings and ECG confirmation, separate activation/report paths,
-best/tuned/recovery policies, rejection and stale activity, state invalidation,
+automatic directories and standard/override recordings, ECG confirmation,
+combined install with separate service start, fingerprinted activation paths,
+best/tuned/recovery policies, rejected preparation/reports, failed readiness,
+stale activity and reinstallation,
 worker scheduling/degradation, health delays and unchanged emission coordinates.
 They do not execute target preparation/activation, use real weights, or start or
 stop a real service. Existing policy/SSH/configuration tests remain part of CTest.

@@ -20,7 +20,7 @@ RecoveryPanel::RecoveryPanel(RecoveryController *controller, QWidget *parent)
     : QWidget(parent), controller_(controller)
 {
     auto *layout = new QVBoxLayout(this);
-    auto *deploymentGroup = new QGroupBox("Persistent startup recovery (next preparation)", this);
+    auto *deploymentGroup = new QGroupBox("Startup recovery", this);
     deploymentGroup_ = deploymentGroup;
     auto *deploymentLayout = new QVBoxLayout(deploymentGroup);
     deployment_ = new QComboBox(deploymentGroup);
@@ -35,10 +35,7 @@ RecoveryPanel::RecoveryPanel(RecoveryController *controller, QWidget *parent)
     restoreDeployment->setObjectName("restoreRecoveryDeployment");
     deploymentLayout->addWidget(restoreDeployment);
     auto *explanation = new QLabel(
-        "For this same model, choose saved recovery settings or current-only, prepare a new isolated bundle "
-        "while idle, review its evidence and activate it. Starting the service is a separate action. "
-        "Saved settings may also disable recovery if calibration selected no threshold. "
-        "Changing this selection alone sends no command.",
+        "Choose the startup policy, then Install selected model. Starting the service is separate.",
         deploymentGroup);
     explanation->setWordWrap(true);
     deploymentLayout->addWidget(explanation);
@@ -176,7 +173,7 @@ void RecoveryPanel::update()
         summary = s.manifest.values.value("recovery_threshold").isEmpty()
                       ? "Saved startup: recovery off (current output only)."
                       : "Saved startup: recovery on.";
-        summary += " Live switching is unavailable on this stack; use Startup recovery, isolated preparation and separate activation. "
+        summary += " Live switching is unavailable on this stack; choose Startup recovery and Install selected model. "
                    "Active recovery state is unconfirmed.";
     }
     else if (s.api.value("confirmation") != "confirmed" || !active.value("enabled").isBool())

@@ -12,6 +12,7 @@
 #include <QRegularExpression>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QUuid>
 
 #include <QCheckBox>
 #include <QCloseEvent>
@@ -252,23 +253,17 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
       "Requires the full Jetson Python environment and a built runtime. Stop "
       "the service and direct inference first."));
   finishedModelForm->addRow(QStringLiteral("Finished models"), modelSelectionRow);
-  bundleDirectoryEdit_ = new QLineEdit(modelDeploymentGroup);
-  bundleDirectoryEdit_->setObjectName("bundleDirectory");
-  bundleDirectoryEdit_->setPlaceholderText("artifact/model-jetson-run-001 (new directory)");
   pythonExecutableEdit_ = new QLineEdit("/home/orin/envs/jet/bin/python", modelDeploymentGroup);
   pythonExecutableEdit_->setObjectName("jetsonPython");
   validationInputsEdit_ = new QPlainTextEdit(modelDeploymentGroup);
   validationInputsEdit_->setObjectName("validationInputs");
-  validationInputsEdit_->setPlaceholderText("data/live/p12/p12_out.parquet\nOne raw parity recording per line; all samples are checked");
+  validationInputsEdit_->setPlaceholderText("Automatic: existing p12/p13 raw ECG recordings.\nOverride: one remote parquet path per line.");
   validationInputsEdit_->setMaximumHeight(65);
   ecg3SourceCheck_ = new QCheckBox("I confirmed the model was trained with ECG3 = ECG2 − ECG1", modelDeploymentGroup);
   ecg3SourceCheck_->setObjectName("ecg3SourceConfirmed");
-  qualificationCheck_ = new QCheckBox("I accepted accuracy, sustained timing and hardware qualification for this bundle", modelDeploymentGroup);
-  qualificationCheck_->setObjectName("bundleQualificationAccepted");
-  qualificationCheck_->setToolTip("Preparation validates equivalence and inference-only timing. Review independent accuracy, sustained processing and physical timing evidence before activation.");
-  preparationStateLabel_ = new QLabel("Preparation: no bundle prepared in this session", modelDeploymentGroup);
+  preparationStateLabel_ = new QLabel("Preparation: not started", modelDeploymentGroup);
   preparationStateLabel_->setObjectName("preparationState");
-  activationStateLabel_ = new QLabel("Activation: no activation requested in this session", modelDeploymentGroup);
+  activationStateLabel_ = new QLabel("Activation: not started", modelDeploymentGroup);
   activationStateLabel_->setObjectName("activationState");
   for (auto *label : {preparationStateLabel_, activationStateLabel_}) {
     label->setWordWrap(true);
@@ -277,15 +272,35 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   activateModelButton_ = makeActionButton(QStringLiteral("Activate prepared bundle"), modelDeploymentGroup);
   activateModelButton_->setObjectName("activatePreparedBundle");
   activateModelButton_->setToolTip("Activate the prepared pair using its fingerprinted validation report. The service must already be idle. Starting the service is a separate action.");
-  finishedModelForm->addRow("New bundle directory", bundleDirectoryEdit_);
-  finishedModelForm->addRow("Jetson Python", pythonExecutableEdit_);
-  finishedModelForm->addRow("Validation recordings", validationInputsEdit_);
+  installModelButton_ = makeActionButton("Install selected model", modelDeploymentGroup);
+  installModelButton_->setObjectName("installSelectedModel");
+  installModelButton_->setToolTip("Convert saved PTH weights, validate the engine, activate the checked model and verify service readiness. The service must already be stopped and will stay stopped.");
+  installationStateLabel_ = new QLabel("Select a saved model to install. The service stays stopped until Start.", modelDeploymentGroup);
+  installationStateLabel_->setObjectName("installationState");
+  installationStateLabel_->setWordWrap(true);
+  installationStateLabel_->setTextFormat(Qt::PlainText);
   finishedModelForm->addRow(ecg3SourceCheck_);
-  finishedModelForm->addRow(reexportModelButton_);
+  finishedModelForm->addRow(installModelButton_);
+  finishedModelForm->addRow(installationStateLabel_);
   finishedModelForm->addRow(preparationStateLabel_);
-  finishedModelForm->addRow(qualificationCheck_);
-  finishedModelForm->addRow(activateModelButton_);
   finishedModelForm->addRow(activationStateLabel_);
+  auto *advancedButton = new QPushButton("Advanced model installation", modelDeploymentGroup);
+  advancedButton->setObjectName("showAdvancedModelInstallation");
+  advancedButton->setCheckable(true);
+  auto *advancedSettings = new QWidget(modelDeploymentGroup);
+  advancedSettings->setObjectName("advancedModelInstallation");
+  auto *advancedForm = new QFormLayout(advancedSettings);
+  advancedForm->addRow("Jetson Python", pythonExecutableEdit_);
+  advancedForm->addRow("Validation recordings", validationInputsEdit_);
+  auto *recordingHelp = new QLabel("Recorded ECG is replayed to check conversion parity. Empty uses existing data/live/p12 and p13 out recordings. These checks do not measure accuracy or sustained real-time performance.", advancedSettings);
+  recordingHelp->setWordWrap(true);
+  advancedForm->addRow(recordingHelp);
+  advancedForm->addRow(reexportModelButton_);
+  advancedForm->addRow(activateModelButton_);
+  advancedSettings->hide();
+  connect(advancedButton, &QPushButton::toggled, advancedSettings, &QWidget::setVisible);
+  finishedModelForm->addRow(advancedButton);
+  finishedModelForm->addRow(advancedSettings);
   serviceLayout->addWidget(modelDeploymentGroup);
   serviceLayout->addWidget(serviceSafetyCheck_);
   serviceLayout->addLayout(serviceMaintenanceActions);
@@ -607,6 +622,18 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
         TaskKind::serviceLogs);
   });
 
+  connect(installModelButton_, &QPushButton::clicked, this, [this] {
+    if (!installModelButton_->isEnabled()) return;
+    createPreparationDirectory();
+    const auto options = diagnosticOptions();
+    const auto error = validatePreparationOptions(options);
+    if (!error.isEmpty()) { statusLabel_->setText(error); return; }
+    bundlePrepared_ = false;
+    installStage_ = "preparation";
+    installationStateLabel_->setText("Installing selected model… The service will stay stopped.");
+    activationStateLabel_->setText("Activation: waiting for preparation checks");
+    runCommand("Install selected model", installModelCommand(options), TaskKind::installModel);
+  });
   connect(activateModelButton_, &QPushButton::clicked, this, [this] {
     if (!activateModelButton_->isEnabled()) return;
     activationStateLabel_->setText("Activation: checking fingerprints and activating prepared files…");
@@ -626,6 +653,7 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
     updateActionAvailability();
   });
   connect(reexportModelButton_, &QPushButton::clicked, this, [this] {
+    createPreparationDirectory();
     auto options = diagnosticOptions();
     options.preparationMode = QStringLiteral("complete");
     const QString error = validatePreparationOptions(options);
@@ -634,12 +662,12 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
       return;
     }
     bundlePrepared_ = false;
-    qualificationCheck_->setChecked(false);
     preparationStateLabel_->setText("Preparation: building isolated bundle and validating recordings…");
     runCommand(QStringLiteral("Prepare isolated model on Jetson"),
                reexportModelCommand(options), TaskKind::reexportModel);
   });
   connect(prepareModelButton_, &QPushButton::clicked, this, [this] {
+    createPreparationDirectory();
     const auto options = diagnosticOptions();
     const QString error = validateDiagnosticOptions(options);
     if (!error.isEmpty()) {
@@ -648,7 +676,6 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
     }
     if (!validatePreparationOptions(options).isEmpty()) { statusLabel_->setText(validatePreparationOptions(options)); return; }
     bundlePrepared_ = false;
-    qualificationCheck_->setChecked(false);
     preparationStateLabel_->setText("Preparation: building isolated bundle and validating recordings…");
     runCommand(QStringLiteral("Prepare isolated model on Jetson"),
                prepareStoppedModelCommand(options), TaskKind::prepareModel);
@@ -749,11 +776,9 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   connect(modelNameEdit_, &QLineEdit::textChanged, this, &MainWindow::syncFinishedModelSelection);
   connect(modelDirectoryEdit_, &QLineEdit::textChanged, this, &MainWindow::syncFinishedModelSelection);
   connect(variantCombo_, &QComboBox::currentTextChanged, this, &MainWindow::syncFinishedModelSelection);
-  for (auto *edit : {bundleDirectoryEdit_, pythonExecutableEdit_})
-    connect(edit, &QLineEdit::textChanged, this, [this] { invalidatePreparedBundle(); updateActionAvailability(); });
+  connect(pythonExecutableEdit_, &QLineEdit::textChanged, this, [this] { invalidatePreparedBundle(); updateActionAvailability(); });
   connect(validationInputsEdit_, &QPlainTextEdit::textChanged, this, [this] { invalidatePreparedBundle(); updateActionAvailability(); });
   connect(ecg3SourceCheck_, &QCheckBox::toggled, this, [this] { invalidatePreparedBundle(); updateActionAvailability(); });
-  connect(qualificationCheck_, &QCheckBox::toggled, this, &MainWindow::updateActionAvailability);
   connect(preparationModeCombo_,
           qOverload<int>(&QComboBox::currentIndexChanged), this,
           [invalidate] { invalidate(); });
@@ -850,6 +875,10 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
             }
             if (activeTask_ == TaskKind::activateModel)
               activationStateLabel_->setText("Activation: command could not start; active slot unconfirmed");
+            if (activeTask_ == TaskKind::installModel) {
+              installationStateLabel_->setText("Installation could not start. Review the connection and retry.");
+              bundlePrepared_ = false;
+            }
             activeTask_ = TaskKind::none;
             updateActionAvailability();
           });
@@ -1008,10 +1037,11 @@ DiagnosticRuntimeOptions MainWindow::diagnosticOptions() const {
       .rawCapturePath = rawCapturePathEdit_->text().trimmed(),
       .emitProbabilities = emitProbabilitiesCheck_->isChecked(),
       .forceRecoveryOff = recoveryPanel_->forceRecoveryOff(),
-      .bundleDirectory = bundleDirectoryEdit_->text().trimmed(),
+      .bundleDirectory = preparedBundleDirectory_.isEmpty() ? "build_native/prepared_models/gui-pending" : preparedBundleDirectory_,
       .validationInputs = validationInputsEdit_->toPlainText().split(QRegularExpression("[\\r\\n]+"), Qt::SkipEmptyParts),
       .pythonExecutable = pythonExecutableEdit_->text().trimmed(),
       .ecg3SourceConfirmed = ecg3SourceCheck_->isChecked(),
+      .autoValidationInputs = true,
   };
 }
 
@@ -1044,11 +1074,11 @@ void MainWindow::runCommand(const QString &label, const QString &command,
     standardInput.append('\n');
   }
   const SshConnectionOptions options = connectionOptions();
-  const bool mutation = kind == TaskKind::activateModel || kind == TaskKind::prepareModel || kind == TaskKind::reexportModel ||
+  const bool mutation = kind == TaskKind::installModel || kind == TaskKind::activateModel || kind == TaskKind::prepareModel || kind == TaskKind::reexportModel ||
       kind == TaskKind::serviceMutation || kind == TaskKind::serviceUnitRepair || kind == TaskKind::rebuildRuntime;
   if (mutation) invalidateAvailability(); // A failed/cancelled request can still have changed remote state.
   if (mutation) { thresholds_.invalidate(); recovery_.invalidate(); }
-  runner_.start(options, (kind == TaskKind::prepareModel || kind == TaskKind::reexportModel || kind == TaskKind::activateModel)
+  runner_.start(options, (kind == TaskKind::prepareModel || kind == TaskKind::reexportModel || kind == TaskKind::activateModel || kind == TaskKind::installModel)
       ? thresholds::deploymentLock(command) : command, standardInput);
   if (options.acceptNewHostKey && runner_.isRunning()) {
     acceptNewHostKeyCheck_->setChecked(false);
@@ -1093,6 +1123,7 @@ void MainWindow::appendClassifiedConsoleBytes(QByteArray &pending,
     const QByteArray line = pending.left(newline + 1);
     pending.remove(0, newline + 1);
     applyRuntimeInputEvent(line);
+    if (activeTask_ == TaskKind::installModel && line.startsWith("__JCG_")) continue;
     const ConsoleLineSeverity severity = classifyConsoleLine(line);
     const QByteArray displayLine = activeTask_ == TaskKind::serviceLogs
                                        ? serviceLogDisplayLine(line)
@@ -1110,6 +1141,19 @@ void MainWindow::appendClassifiedConsoleBytes(QByteArray &pending,
 }
 
 void MainWindow::applyRuntimeInputEvent(const QByteArray &line) {
+  const QByteArray installPrefix = "__JCG_INSTALL_STAGE__=";
+  if (activeTask_ == TaskKind::installModel && line.startsWith(installPrefix)) {
+    installStage_ = QString::fromUtf8(line.mid(installPrefix.size()).trimmed());
+    if (installStage_ == "preparation") {
+      preparationStateLabel_->setText("Preparation: converting saved weights and checking the engine…");
+    } else if (installStage_ == "activation") {
+      preparationStateLabel_->setText("Preparation: conversion checks passed. Accuracy and sustained timing remain unverified.");
+      activationStateLabel_->setText("Activation: verifying the report and installing checked files…");
+    } else if (installStage_ == "verification") {
+      activationStateLabel_->setText("Activation: checked files installed; service not started");
+      installationStateLabel_->setText("Model installed. Verifying service readiness…");
+    }
+  }
   if (activeTask_ == TaskKind::directInference || activeTask_ == TaskKind::serviceLogs) {
     const auto start = line.indexOf('{');
     const auto object = start >= 0 ? QJsonDocument::fromJson(line.mid(start)).object() : QJsonObject{};
@@ -1467,10 +1511,12 @@ void MainWindow::updateActionAvailability() {
   const bool publishedSelection = finishedModelCombo_->currentIndex() > 0;
   const bool preparationValid = validatePreparationOptions(diagnosticOptions()).isEmpty();
   activateModelButton_->setEnabled(!anyBusy && preparationValid && bundlePrepared_ &&
-      qualificationCheck_->isChecked() && capabilities_.known && capabilities_.prepareScript &&
+      capabilities_.known && capabilities_.prepareScript &&
       !capabilities_.serviceActive && !capabilities_.directInferenceActive);
-  qualificationCheck_->setEnabled(!anyBusy && bundlePrepared_);
-  for (auto *edit : {bundleDirectoryEdit_, pythonExecutableEdit_}) edit->setEnabled(!anyBusy);
+  installModelButton_->setEnabled(!anyBusy && preparationValid &&
+      (publishedSelection || (capabilities_.known && capabilities_.prepareScript && capabilities_.reexportInputs && capabilities_.runtime)) &&
+      !capabilities_.serviceActive && !capabilities_.directInferenceActive);
+  pythonExecutableEdit_->setEnabled(!anyBusy);
   validationInputsEdit_->setEnabled(!anyBusy);
   ecg3SourceCheck_->setEnabled(!anyBusy);
 
@@ -1627,19 +1673,41 @@ void MainWindow::finishMainCommand(int exitCode,
   }
   activeTask_ = TaskKind::none;
   const bool success = exitStatus == QProcess::NormalExit && exitCode == 0 && !cancelled;
+  if (completedTask == TaskKind::installModel) {
+    bundlePrepared_ = false;
+    if (success) applyAvailabilityProbe(activeStandardOutput_);
+    const bool ready = success && capabilities_.serviceReady && capabilities_.activeSelectionMatches &&
+        !capabilities_.serviceActive && !capabilities_.directInferenceActive;
+    if (ready) {
+      installationStateLabel_->setText("Installed — ready to start the service. Accuracy and sustained timing remain unverified.");
+      statusLabel_->setText("Model installation complete. Start the service when ready.");
+    } else {
+      capabilities_.serviceReady = false;
+      if (installStage_ == "preparation") {
+        preparationStateLabel_->setText("Preparation: failed or cancelled; model was not activated");
+        activationStateLabel_->setText("Activation: not attempted");
+      } else if (installStage_ == "activation") {
+        activationStateLabel_->setText("Activation: failed or cancelled; active model unconfirmed");
+      }
+      if (!success) invalidateAvailability();
+      installationStateLabel_->setText(installStage_ == "verification"
+          ? "Model activation finished, but service readiness is unconfirmed. Review the console before starting."
+          : "Installation did not finish. Review the console and retry after resolving the error. Service was not started.");
+      statusLabel_->setText(installationStateLabel_->text());
+    }
+    installStage_.clear();
+  }
   if (completedTask == TaskKind::prepareModel || completedTask == TaskKind::reexportModel) {
     bundlePrepared_ = success;
     preparationStateLabel_->setText(success
         ? "Preparation: checks passed; bundle not activated. Accuracy, sustained processing and physical timing remain unverified."
         : "Preparation: failed or cancelled; bundle unconfirmed. Review retained evidence and use a new output directory.");
-    qualificationCheck_->setChecked(false);
   }
   if (completedTask == TaskKind::activateModel) {
     activationStateLabel_->setText(success
         ? "Activation: prepared files activated; service not started. Check before a separate service start."
         : "Activation: failed or cancelled; active slot unconfirmed. Check before continuing.");
     bundlePrepared_ = false;
-    qualificationCheck_->setChecked(false);
   }
   updateActionAvailability();
   if (completedTask == TaskKind::availabilityProbe && exitStatus == QProcess::NormalExit && exitCode == 0 && !cancelled) {
@@ -1652,6 +1720,13 @@ void MainWindow::finishMainCommand(int exitCode,
 
 void MainWindow::invalidatePreparedBundle() {
   bundlePrepared_ = false;
-  qualificationCheck_->setChecked(false);
-  preparationStateLabel_->setText("Preparation: selection or validation settings changed; prepare a new bundle");
+  preparedBundleDirectory_.clear();
+  preparationStateLabel_->setText("Preparation: waiting for installation");
+  installationStateLabel_->setText("Selection or settings changed. Install the selected model when ready.");
+}
+
+void MainWindow::createPreparationDirectory() {
+  preparedBundleDirectory_ = QString("build_native/prepared_models/gui-%1-%2-%3")
+      .arg(modelNameEdit_->text().trimmed(), QDateTime::currentDateTimeUtc().toString("yyyyMMdd-HHmmss"),
+           QUuid::createUuid().toString(QUuid::WithoutBraces));
 }

@@ -41,12 +41,14 @@ struct DiagnosticRuntimeOptions {
   QStringList validationInputs;
   QString pythonExecutable{"/home/orin/envs/jet/bin/python"};
   bool ecg3SourceConfirmed{false};
+  bool autoValidationInputs{false};
 };
 
 [[nodiscard]] QString
 validateDiagnosticOptions(const DiagnosticRuntimeOptions &options);
 [[nodiscard]] QString validatePreparationOptions(const DiagnosticRuntimeOptions &options);
 [[nodiscard]] QString activatePreparedModelCommand(const DiagnosticRuntimeOptions &options);
+[[nodiscard]] QString installModelCommand(const DiagnosticRuntimeOptions &options);
 [[nodiscard]] QString diagnosticManifestPath();
 [[nodiscard]] QString serviceUnitRepairCommand(bool sudoPasswordProvided);
 [[nodiscard]] QString

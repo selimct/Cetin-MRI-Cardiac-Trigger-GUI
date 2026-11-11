@@ -196,7 +196,8 @@ QString validatePreparationOptions(const DiagnosticRuntimeOptions &options) {
   const auto bundle = QDir::cleanPath(options.bundleDirectory);
   if (!isSafeRelativePath(options.bundleDirectory, false) || bundle == "deploy" || bundle.startsWith("deploy/"))
     return "Choose a new bundle directory beneath the project root, outside deploy/.";
-  if (options.validationInputs.isEmpty()) return "Add representative raw parquet validation recordings.";
+  if (options.validationInputs.isEmpty() && !options.autoValidationInputs)
+    return "Add representative raw parquet validation recordings.";
   for (const auto &input : options.validationInputs)
     if (!isSafeRelativePath(input, false)) return "Validation recordings must stay beneath the remote project root.";
   if (!options.ecg3SourceConfirmed) return "Confirm training uses ECG2 − ECG1 for the UART-derived ECG3 channel.";
@@ -256,6 +257,18 @@ QString prepareModelCommand(const DiagnosticRuntimeOptions &options) {
   for (const auto &input : options.validationInputs)
     command += " --validation-input " + posixShellQuote(QDir::cleanPath(input));
   if (options.forceRecoveryOff) command += QStringLiteral(" --no-recovery");
+  if (options.validationInputs.isEmpty() && options.autoValidationInputs) {
+    command = QString::fromUtf8(R"SH(
+validation_args=()
+for recording in data/live/p12/p12_out.parquet data/live/p13/p13_out.parquet; do
+  if test -f "$recording"; then validation_args+=(--validation-input "$recording"); fi
+done
+if test "${#validation_args[@]}" -eq 0; then
+  echo 'No standard parity recordings found. Set existing raw parquet paths under Advanced model installation → Validation recordings.' >&2
+  exit 2
+fi
+)SH") + command + " \"${validation_args[@]}\"";
+  }
   return command;
 }
 
@@ -402,6 +415,19 @@ QString reexportModelCommand(const DiagnosticRuntimeOptions &options) {
   auto complete = options;
   complete.preparationMode = QStringLiteral("complete");
   return prepareStoppedModelCommand(complete);
+}
+
+QString installModelCommand(const DiagnosticRuntimeOptions &options) {
+  const auto error = validatePreparationOptions(options);
+  if (!error.isEmpty()) return "printf '%s\\n' " + posixShellQuote(error) + " >&2; exit 2";
+  // Keep the report and all intermediate artifacts in the new working directory.
+  // Each subshell must succeed before the next stage; no service mutation occurs.
+  return "printf '__JCG_INSTALL_STAGE__=preparation\\n'\n(\n" +
+      prepareStoppedModelCommand(options) + "\n) || exit $?\n" +
+      "printf '__JCG_INSTALL_STAGE__=activation\\n'\n(\n" +
+      activatePreparedModelCommand(options) + "\n) || exit $?\n" +
+      "printf '__JCG_INSTALL_STAGE__=verification\\n'\n(\n" +
+      availabilityProbeCommand(options) + "\n) || exit $?\n";
 }
 
 QString validateRuntimeCommand(const DiagnosticRuntimeOptions &options) {

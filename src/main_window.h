@@ -51,6 +51,7 @@ private:
     rebuildRuntime,
     directInference,
     activateModel,
+    installModel,
   };
 
   struct RemoteCapabilities {
@@ -89,6 +90,7 @@ private:
                   TaskKind kind = TaskKind::ordinary);
   void stopDirectInference();
   void invalidatePreparedBundle();
+  void createPreparationDirectory();
   void appendConsole(const QString &text, const QColor &color);
   void appendConsoleBytes(const QByteArray &data, const QColor &color);
   void appendClassifiedConsoleBytes(QByteArray &pending,
@@ -124,6 +126,8 @@ private:
   QString observedManifestRevision_, observedConfigRevision_, observedRuntimeRevision_;
   bool primaryReadbackPending_{false};
   bool bundlePrepared_{false};
+  QString preparedBundleDirectory_;
+  QString installStage_;
   QMap<QString, QString> workerScheduling_;
 
   QLineEdit *hostEdit_{nullptr};
@@ -167,11 +171,11 @@ private:
   QPushButton *prepareModelButton_{nullptr};
   QPushButton *reexportModelButton_{nullptr};
   QPushButton *activateModelButton_{nullptr};
-  QLineEdit *bundleDirectoryEdit_{nullptr};
+  QPushButton *installModelButton_{nullptr};
+  QLabel *installationStateLabel_{nullptr};
   QLineEdit *pythonExecutableEdit_{nullptr};
   QPlainTextEdit *validationInputsEdit_{nullptr};
   QCheckBox *ecg3SourceCheck_{nullptr};
-  QCheckBox *qualificationCheck_{nullptr};
   QLabel *preparationStateLabel_{nullptr};
   QLabel *activationStateLabel_{nullptr};
   QLabel *workerSchedulingLabel_{nullptr};
