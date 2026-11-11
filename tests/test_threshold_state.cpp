@@ -137,6 +137,43 @@ private slots:
         bad.replace("recovery_head=true", "recovery_head=yes");
         QVERIFY_EXCEPTION_THROWN(Manifest::parse(bad), std::runtime_error);
     }
+    void validatesPredictionManifestSchema()
+    {
+        // Current-frame deployments retain legacy manifests and schema v1.
+        const auto legacy = fixture();
+        QVERIFY(Manifest::parse(legacy).recoveryHead);
+        const auto v1 = QByteArray("schema=dkfz-live-deployment-v1\n") + legacy;
+        QVERIFY(Manifest::parse(v1).recoveryHead);
+        const auto v2 = QByteArray("schema=dkfz-live-deployment-v2\n") + legacy;
+        const auto current = v2 + "prediction_mode=current\nprediction_delay_frames=0\n";
+        QVERIFY(Manifest::parse(current).recoveryHead);
+        QVERIFY_EXCEPTION_THROWN(Manifest::parse(v2), std::runtime_error);
+        QVERIFY_EXCEPTION_THROWN(Manifest::parse(v2 + "prediction_mode=current\n"), std::runtime_error);
+        QVERIFY_EXCEPTION_THROWN(Manifest::parse(v2 + "prediction_delay_frames=0\n"), std::runtime_error);
+        QVERIFY_EXCEPTION_THROWN(Manifest::parse(QByteArray("schema=unknown\n") + legacy), std::runtime_error);
+
+        auto delayed = legacy;
+        delayed.replace("recovery_head=true", "recovery_head=false");
+        delayed.replace("recovery_threshold=0.93", "recovery_threshold=");
+        delayed += "prediction_mode=delayed_100hz\nprediction_delay_frames=1\n"
+                   "raw_hz=400\nframe_size_raw=4\nwindow_size=100\n";
+        for (const auto &schema : {QByteArray(), QByteArray("schema=\n"),
+                                  QByteArray("schema=dkfz-live-deployment-v1\n"),
+                                  QByteArray("schema=dkfz-live-deployment-v3\n")})
+            QVERIFY_EXCEPTION_THROWN(Manifest::parse(schema + delayed), std::runtime_error);
+
+        const auto valid = Manifest::parse(QByteArray("schema=dkfz-live-deployment-v2\n") + delayed);
+        QVERIFY(!valid.recoveryHead);
+        // Applying a GUI threshold must leave the trained timing and holdoff intact.
+        const auto changed = Manifest::parse(valid.patchManual("0.4"));
+        QCOMPARE(changed.manual.value(), 0.4);
+        for (const auto &key : {"schema", "prediction_mode", "prediction_delay_frames", "raw_hz",
+                                "frame_size_raw", "window_size", "holdoff_frames"})
+            QCOMPARE(changed.values.value(key), valid.values.value(key));
+        QCOMPARE(changed.values.value("holdoff_frames").toInt() *
+                     changed.values.value("frame_size_raw").toInt() * 1000 /
+                     changed.values.value("raw_hz").toInt(), 200);
+    }
     void readbackRequiresFreshAcceptedAndActive()
     {
         Readback r;

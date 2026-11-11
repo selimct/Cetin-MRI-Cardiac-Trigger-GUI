@@ -155,6 +155,49 @@ class RecoveryTest final : public QObject
         model.remove("recovery_only");
         QCOMPARE(recovery::modelKind(model), QString("Recovery (training mode unknown)"));
     }
+    void informationFollowsPrimaryPredictionTarget()
+    {
+        recovery::State s;
+        auto delayed = manifest(false);
+        delayed.replace("frame_size_raw=5", "frame_size_raw=4");
+        delayed.replace("raw_hz=500", "raw_hz=400");
+        delayed += "schema=dkfz-live-deployment-v2\nwindow_size=100\n"
+                   "prediction_mode=delayed_100hz\nprediction_delay_frames=1\n";
+        s.manifest = thresholds::Manifest::parse(delayed);
+        // Deployed timing remains visible even when source metadata is unavailable.
+        auto info = s.information();
+        QVERIFY(info.contains("Previous-frame primary: one-frame lookahead = 10 ms"));
+        QVERIFY(info.contains("Source calibration/provenance unavailable"));
+        QVERIFY(!info.contains("Recovered events only"));
+
+        s.source = {{"modelname", "heart"}, {"recovery_head", false}, {"recovery_only", false}};
+        s.sourceAvailable = true;
+        info = s.information();
+        QVERIFY(info.contains("Recovery unavailable: single-output model"));
+        QVERIFY(info.contains("Training: single-output previous-frame primary"));
+        QVERIFY(!info.contains("Training: joint"));
+        QVERIFY(!info.contains("Starting current-only reproduces a frozen primary detector"));
+
+        s.manifest = thresholds::Manifest::parse(manifest(false));
+        info = s.information();
+        QVERIFY(info.contains("Current-frame primary: no configured lookahead"));
+        QVERIFY(info.contains("Training: single-output current-frame primary"));
+        QVERIFY(!info.contains("one-frame lookahead"));
+        QVERIFY(!info.contains("Training: joint"));
+
+        // Two-output models retain recovery-specific timing and training descriptions.
+        s.manifest = thresholds::Manifest::parse(manifest());
+        s.source = source();
+        info = s.information();
+        QVERIFY(info.contains("Recovered events only: one-frame lookahead = 10 ms"));
+        QVERIFY(info.contains("Training: recovery only"));
+        s.source["recovery_only"] = false;
+        QVERIFY(s.information().contains("Training: joint"));
+        auto missingTiming = manifest();
+        missingTiming.replace("raw_hz=500\n", "");
+        s.manifest = thresholds::Manifest::parse(missingTiming);
+        QVERIFY(s.information().contains("Recovery lookahead duration unavailable"));
+    }
     void thresholdValidationAndApiIdentity()
     {
         QCOMPARE(recovery::threshold("1"), 1.);

@@ -198,6 +198,7 @@ QString State::information() const
 {
     if (manifest.contents.isEmpty())
         return "Refresh to read the remote deployment";
+    const bool delayedPrimary = manifest.values.value("prediction_mode", "current") == "delayed_100hz";
     QStringList lines;
     lines << auditPolicy();
     lines << (supportsRecovery()
@@ -206,10 +207,15 @@ QString State::information() const
     bool a = false, b = false;
     const auto frame = manifest.values.value("frame_size_raw").toDouble(&a);
     const auto hz = manifest.values.value("raw_hz").toDouble(&b);
-    lines << (a && b && std::isfinite(frame) && std::isfinite(hz) && frame > 0 && hz > 0
-                  ? QString("Recovered events only: one-frame lookahead = %1 ms")
-                        .arg(1000 * frame / hz, 0, 'g', 12)
-                  : "Recovery lookahead duration unavailable");
+    if (delayedPrimary || supportsRecovery())
+        lines << (a && b && std::isfinite(frame) && std::isfinite(hz) && frame > 0 && hz > 0
+                      ? QString(delayedPrimary ? "Previous-frame primary: one-frame lookahead = %1 ms"
+                                               : "Recovered events only: one-frame lookahead = %1 ms")
+                            .arg(1000 * frame / hz, 0, 'g', 12)
+                      : delayedPrimary ? "Primary lookahead duration unavailable"
+                                       : "Recovery lookahead duration unavailable");
+    else
+        lines << "Current-frame primary: no configured lookahead";
     if (!sourceAvailable)
     {
         lines << "Source calibration/provenance unavailable";
@@ -227,7 +233,10 @@ QString State::information() const
             lines << "Calibrated recovery threshold: " + number(source.value("recovery_threshold"));
         lines << "Source default enabled: " + QString(sourceEnabled() ? "yes" : "no");
     }
-    if (source.value("recovery_only").isBool())
+    if (!supportsRecovery())
+        lines << (delayedPrimary ? "Training: single-output previous-frame primary"
+                                 : "Training: single-output current-frame primary");
+    else if (source.value("recovery_only").isBool())
         lines << (source.value("recovery_only").toBool()
                       ? "Training: recovery only; primary LSTM/current head declared frozen"
                       : "Training: joint; no equivalence guarantee to an independent single-output model");
@@ -282,8 +291,9 @@ QString State::information() const
     lines << "Audit applicability unconfirmed / policy customized if primary threshold, early emission, "
              "holdoff or recovery threshold differs. Runtime changes do not recalibrate or enforce the FP "
              "allowance.";
-    lines << "Starting current-only reproduces a frozen primary detector only with the same preprocessing "
-             "and runtime settings. Live disabling cannot undo emitted recovery events or shared holdoff.";
+    if (supportsRecovery())
+        lines << "Starting current-only reproduces a frozen primary detector only with the same preprocessing "
+                 "and runtime settings. Live disabling cannot undo emitted recovery events or shared holdoff.";
     return lines.join('\n');
 }
 QString telemetryDescription(const QJsonObject &e)

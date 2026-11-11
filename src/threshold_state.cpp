@@ -78,11 +78,21 @@ namespace thresholds
         if (recovery != "true" && recovery != "false" && recovery != "1" && recovery != "0")
             fail("Malformed recovery_head");
         m.recoveryHead = recovery == "true" || recovery == "1";
+        const auto schema = m.values.value("schema");
+        // Keep schema-less current-frame manifests supported for older deployments.
+        if (m.values.contains("schema") && schema != "dkfz-live-deployment-v1" &&
+            schema != "dkfz-live-deployment-v2")
+            fail("Unsupported deployment manifest schema");
+        if (schema == "dkfz-live-deployment-v2" &&
+            (!m.values.contains("prediction_mode") || !m.values.contains("prediction_delay_frames")))
+            fail("Deployment schema v2 requires an explicit primary prediction target contract");
         const auto mode = m.values.value("prediction_mode", "current");
         bool delayOk = false;
         const auto delay = m.values.value("prediction_delay_frames", "0").toInt(&delayOk);
         if (!delayOk || (mode != "current" && mode != "delayed_100hz") ||
             delay != (mode == "delayed_100hz" ? 1 : 0)) fail("Invalid primary prediction target contract");
+        if (delay && schema != "dkfz-live-deployment-v2")
+            fail("Delayed primary requires deployment schema v2");
         if (delay && (m.values.value("raw_hz").toDouble() != 400 ||
             m.values.value("frame_size_raw").toInt() != 4 ||
             m.values.value("window_size").toInt() < 2 || m.recoveryHead))
