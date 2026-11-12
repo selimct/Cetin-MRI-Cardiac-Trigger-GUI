@@ -13,6 +13,10 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QTemporaryDir>
+#include <QCryptographicHash>
+#ifndef Q_OS_WIN
+#include <unistd.h>
+#endif
 
 class DiagnosticCommandBuilderTest final : public QObject {
   Q_OBJECT
@@ -35,6 +39,9 @@ private slots:
   void buildsFingerprintedActivationCommand();
   void serviceSchedulingProfiles();
   void automaticInstallationKeepsValidationAndSeparateServiceStart();
+  void directStartChecksServiceAndSerializesLaunch();
+  void restartRejectsStaleDeployment();
+  void recognizesInstalledSnapshotAfterReopening();
 };
 
 void DiagnosticCommandBuilderTest::delayedPredictionDiscovery() {
@@ -286,6 +293,8 @@ void DiagnosticCommandBuilderTest::generatedCommandsParseAsBash() {
       installModelCommand(options),
       deploymentStopCommand(false), deploymentStopCommand(true),
       deploymentStartCommand(false, QString(64,'a'), QString(64,'b'), QString(64,'c')),
+      deploymentRestartCommand(false, QString(64,'a'), QString(64,'b'), QString(64,'c')),
+      deploymentRestartCommand(true, QString(64,'a'), QString(64,'b'), QString(64,'c')),
   };
 
   for (const QString &command : commands) {
@@ -455,6 +464,150 @@ void DiagnosticCommandBuilderTest::automaticInstallationKeepsValidationAndSepara
     process.write(command.toUtf8()); process.closeWriteChannel();
     QVERIFY(process.waitForFinished()); QCOMPARE(process.exitCode(), 0);
   }
+}
+
+namespace {
+void writeFixture(const QString &path, const QByteArray &bytes) {
+  QVERIFY(QDir().mkpath(QFileInfo(path).absolutePath()));
+  QFile file(path); QVERIFY(file.open(QIODevice::WriteOnly));
+  QCOMPARE(file.write(bytes), bytes.size()); file.close();
+  QVERIFY(file.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+}
+QProcessEnvironment fixtureEnvironment(const QTemporaryDir &dir) {
+  auto env = QProcessEnvironment::systemEnvironment();
+  env.insert("PATH", dir.filePath("bin") + ':' + env.value("PATH"));
+  env.insert("XDG_RUNTIME_DIR", dir.path());
+  return env;
+}
+}
+
+void DiagnosticCommandBuilderTest::directStartChecksServiceAndSerializesLaunch() {
+#ifdef Q_OS_WIN
+  QSKIP("Linux fake host process fixture");
+#else
+  QTemporaryDir dir; QVERIFY(dir.isValid());
+  writeFixture(dir.filePath("bin/systemctl"), R"SH(#!/bin/bash
+case "$1" in
+ is-active) cat service-state; [[ $(cat service-state) == active ]];;
+ show) echo loaded;;
+esac
+)SH");
+  writeFixture(dir.filePath("build_native/inference/native_uart_live_runtime"), R"SH(#!/bin/bash
+echo launched >> launches
+while ! test -f finish; do sleep 0.02; done
+)SH");
+  DiagnosticRuntimeOptions options{.modelName="heart", .modelDirectory="finished_models/heart"};
+  const auto run = [&](QProcess &process) {
+    process.setProcessEnvironment(fixtureEnvironment(dir));
+    process.setWorkingDirectory(dir.path());
+    process.start("bash", {"-c", startDirectRuntimeCommand(options)});
+    QVERIFY(process.waitForStarted());
+  };
+  for (const auto &state : {"active", "activating", "reloading", "deactivating", "unknown"}) {
+    writeFixture(dir.filePath("service-state"), state);
+    QProcess process; run(process); QVERIFY(process.waitForFinished(5000));
+    QCOMPARE(process.exitCode(), 3);
+    QVERIFY(!QFile::exists(dir.filePath("launches")));
+  }
+  writeFixture(dir.filePath("service-state"), "inactive");
+  // A deployment already holding the lock must finish before launch can proceed.
+  QProcess holder;
+  holder.setWorkingDirectory(dir.path());
+  holder.start("bash", {"-c", "exec 9>.jetson-control-deployment.lock; flock -x 9; echo locked; read -r release"});
+  QVERIFY(holder.waitForReadyRead()); QVERIFY(holder.readAllStandardOutput().contains("locked"));
+  QProcess first; run(first);
+  QTest::qWait(100); QVERIFY(!QFile::exists(dir.filePath("launches")));
+  holder.write("release\n"); QVERIFY(holder.waitForFinished(5000));
+  QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(dir.filePath("launches")), 5000);
+  // Lock was released after PID publication, but that live PID excludes a
+  // second client until the first runtime exits.
+  QProcess second; run(second); QVERIFY(second.waitForFinished(5000));
+  QCOMPARE(second.exitCode(), 73);
+  QFile launches(dir.filePath("launches")); QVERIFY(launches.open(QIODevice::ReadOnly));
+  QCOMPARE(launches.readAll(), QByteArray("launched\n"));
+  writeFixture(dir.filePath("finish"), "done");
+  QVERIFY(first.waitForFinished(5000)); QCOMPARE(first.exitCode(), 0);
+  QVERIFY(!QFile::exists(dir.filePath("dkfz-jetson-control-" + QString::number(getuid()) + "/native_uart_live_runtime.pid")));
+#endif
+}
+
+void DiagnosticCommandBuilderTest::restartRejectsStaleDeployment() {
+#ifdef Q_OS_WIN
+  QSKIP("Linux fake host filesystem fixture");
+#else
+  for (const auto &scenario : {"valid", "manifest", "config", "runtime", "stale-unit", "wrong-bind", "direct"}) {
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    writeFixture(dir.filePath("scenario"), scenario);
+    writeFixture(dir.filePath("bin/sudo"), "#!/bin/bash\nshift 2\nexec \"$@\"\n");
+    writeFixture(dir.filePath("bin/systemctl"), R"SH(#!/bin/bash
+case "$*" in
+ *NeedDaemonReload*) if [[ $(cat scenario) == stale-unit ]]; then echo yes; else echo no; fi;;
+ *FragmentPath*) echo "$PWD/deploy/dkfz-native-uart-live.service";;
+ *WorkingDirectory*) echo /opt/dkfz-live;;
+ *RootDirectory*) echo;;
+ *BindReadOnlyPaths*) if [[ $(cat scenario) == wrong-bind ]]; then echo /wrong:/opt/dkfz-live; else echo "$PWD:/opt/dkfz-live"; fi;;
+ 'restart dkfz-native-uart-live.service')
+  if flock -n .jetson-control-deployment.lock true; then exit 90; fi
+  echo restarted > restarted;;
+ 'is-active --quiet dkfz-native-uart-live.service') exit 0;;
+ *) exit 1;;
+esac
+)SH");
+    writeFixture(dir.filePath("deploy/dkfz-native-uart-live.service"), "ExecStart=/opt/dkfz-live/build_native/inference/native_uart_live_runtime --config /opt/dkfz-live/config/native_uart_live.conf\n");
+    writeFixture(dir.filePath("deploy/model/model.conf"), "manifest");
+    writeFixture(dir.filePath("config/native_uart_live.conf"), "config");
+    writeFixture(dir.filePath("build_native/inference/native_uart_live_runtime"), "runtime");
+    const auto hash = [](const QByteArray &bytes) {
+      return QString::fromLatin1(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex());
+    };
+    const QMap<QString, QString> paths{{"manifest", "deploy/model/model.conf"}, {"config", "config/native_uart_live.conf"}, {"runtime", "build_native/inference/native_uart_live_runtime"}};
+    if (paths.contains(scenario)) writeFixture(dir.filePath(paths.value(scenario)), "changed");
+    if (QString(scenario) == "direct")
+      writeFixture(dir.filePath("dkfz-jetson-control-" + QString::number(getuid()) + "/native_uart_live_runtime.pid"), QByteArray::number(QCoreApplication::applicationPid()));
+    QProcess process; process.setWorkingDirectory(dir.path()); process.setProcessEnvironment(fixtureEnvironment(dir));
+    process.start("bash", {"-c", deploymentRestartCommand(false, hash("manifest"), hash("config"), hash("runtime"))});
+    QVERIFY(process.waitForFinished(5000));
+    QCOMPARE(process.exitCode() == 0, QString(scenario) == "valid");
+    QCOMPARE(QFile::exists(dir.filePath("restarted")), QString(scenario) == "valid");
+  }
+#endif
+}
+
+void DiagnosticCommandBuilderTest::recognizesInstalledSnapshotAfterReopening() {
+#ifdef Q_OS_WIN
+  QSKIP("Linux fake host filesystem fixture");
+#else
+  for (const auto &variant : {"best", "tuned"}) {
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const QString published = "finished_models/heart ' source";
+    const QString snapshot = "build_native/prepared_models/gui-old-session/model";
+    const QString config = published + (QString(variant) == "tuned" ? "/tuning/tuned_config.json" : "/train_config.json");
+    const QString weights = published + (QString(variant) == "tuned" ? "/best_tuned.pth" : "/best.pth");
+    writeFixture(dir.filePath(config), "saved config");
+    writeFixture(dir.filePath(weights), "saved weights");
+    writeFixture(dir.filePath(snapshot + "/train_config.json"), "saved config");
+    writeFixture(dir.filePath(snapshot + "/best.pth"), "saved weights");
+    writeFixture(dir.filePath("bin/systemctl"), "#!/bin/bash\nif [[ $1 == is-active ]]; then echo inactive; fi\nexit 1\n");
+    writeFixture(dir.filePath("deploy/model/model.conf"), "model_name=heart\nmodel_variant=" + QByteArray(variant) + "\nsource_model_dir=" + snapshot.toUtf8() + '\n');
+    DiagnosticRuntimeOptions options{.modelName="heart", .modelDirectory=published, .variant=variant};
+    const auto matches = [&] {
+      QProcess process; process.setWorkingDirectory(dir.path()); process.setProcessEnvironment(fixtureEnvironment(dir));
+      process.start("bash", {"-c", availabilityProbeCommand(options)});
+      if (!process.waitForFinished(5000) || process.exitCode() != 0) return false;
+      return process.readAllStandardOutput().contains("__JCG_ACTIVE_SELECTION__=yes\n");
+    };
+    QVERIFY(matches()); // No in-memory bundle directory from the previous GUI.
+    writeFixture(dir.filePath(weights), "different weights"); QVERIFY(!matches());
+    writeFixture(dir.filePath(weights), "saved weights");
+    writeFixture(dir.filePath(config), "different config"); QVERIFY(!matches());
+    writeFixture(dir.filePath(config), "saved config");
+    QTemporaryDir outside; QVERIFY(outside.isValid());
+    writeFixture(outside.filePath("weights"), "saved weights");
+    QVERIFY(QFile::remove(dir.filePath(snapshot + "/best.pth")));
+    QVERIFY(QFile::link(outside.filePath("weights"), dir.filePath(snapshot + "/best.pth")));
+    QVERIFY(!matches());
+  }
+#endif
 }
 
 QTEST_APPLESS_MAIN(DiagnosticCommandBuilderTest)

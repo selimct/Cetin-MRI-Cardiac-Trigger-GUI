@@ -70,8 +70,22 @@ start the service. The backend additionally checks for concurrent GPU work.
 External tools must honor the runtime's guards/locks; the GUI cannot serialize
 uncooperative external writers. A cancelled SSH command can leave remote work or
 partial evidence; check the host before retrying. Each installation chooses a new directory.
-Service Start pins manifest/config/runtime revisions; Restart retains the
-existing explicit service action and needs a fresh readiness/hardware check.
+Service Start and Restart pin manifest/config/runtime revisions and verify the
+current service mapping under the same deployment lock. Direct Start takes that
+lock while checking service inactivity and publishing its PID, then releases it
+for the runtime session. A second GUI launch checks the published live PID.
+
+Every Check button and Enter runs the complete readiness/model probe. The former
+quick/full split is removed. After reopening the GUI, the probe can match a
+deployed bundle to its published source by comparing the exact configuration and
+checkpoint bytes. It requires both files to remain within the checkout, handles
+best/tuned source layouts, and rejects changed artifacts. Model names alone do
+not establish this relationship.
+
+Live and custom-command stdout/stderr capture retains a 64 KiB tail per channel;
+partial lines are displayed in bounded chunks. The console retains its existing
+block limit and remote direct-session logs remain complete. Finite model/probe
+responses remain intact for parsing.
 
 Prepared tuned weights retain `model_variant=tuned`, but the bundle normalizes
 source copies to `model/train_config.json` and `model/best.pth`. The current

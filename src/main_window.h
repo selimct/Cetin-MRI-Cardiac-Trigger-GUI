@@ -37,6 +37,7 @@ protected:
   void closeEvent(QCloseEvent *event) override;
 
 private:
+  friend class DeploymentWorkflowTest;
   enum class TaskKind {
     none,
     ordinary,
@@ -99,7 +100,6 @@ private:
   void flushClassifiedConsoleBytes(QByteArray &pending);
   void addCommandToHistory(const QString &command);
   void checkAvailability();
-  void runFullAvailabilityProbe();
   void invalidateAvailability();
   void applyAvailabilityProbe(const QByteArray &output);
   void applyFinishedModels(const QByteArray &output);
@@ -139,7 +139,6 @@ private:
   QLineEdit *sudoPasswordEdit_{nullptr};
   QCheckBox *acceptNewHostKeyCheck_{nullptr};
   QPushButton *probeButton_{nullptr};
-  QPushButton *fullProbeButton_{nullptr};
   QPushButton *connectionCheckButton_{nullptr};
   QPushButton *healthButton_{nullptr};
 

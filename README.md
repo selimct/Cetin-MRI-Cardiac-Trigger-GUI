@@ -94,6 +94,7 @@ Model preparation requires the updated backend's isolated export/parity tools.
 The GUI does not fall back to the old prepare-and-activate workflow. A failed or
 cancelled request leaves the remote result unconfirmed; Check before continuing.
 Service Start rechecks manifest, config and runtime revisions before executing.
+Restart uses the same revision checks and deployment lock.
 Activation and service Start are always separate explicit actions.
 
 | Computer | Required checkout | Purpose |
@@ -214,7 +215,11 @@ Selecting an entry fills its declared model name, source directory and variant
 locally. Select **Check** to query the Jetson for that selection.
 
 The GUI reads its model name, variant, and source directory and prevents direct
-Start when they do not match the current selection. Model preparation is
+Start when they do not match the current selection. After reopening the GUI,
+Check also recognizes an installed bundle whose copied configuration and weights
+are byte-identical to the selected published model, including tuned variants.
+Keep that bundle for readback; changed source artifacts require a new installation.
+Model preparation is
 disabled while the service is active, activating, reloading, or deactivating,
 matching `run/deploy_model.sh`. Stop the service when intended, select the model,
 then Install. The final readiness check is automatic; Start remains separate.
@@ -224,7 +229,9 @@ hardware safety checkbox is selected. An empty raw-capture field explicitly
 overrides and disables any capture path inherited from the committed config.
 Direct Start stays disabled until the selected configuration and engine pass
 validation, and direct/service starts are mutually locked to avoid competing
-for the same UART or GPIO resources.
+for the same UART or GPIO resources. Direct Start rechecks that the service is
+stopped under the shared deployment lock and records its PID before releasing
+the lock. Other clients using these GUI commands observe that PID.
 
 Preparation needs the full Jetson Python export/parity environment and a built
 native runtime, rather than only `trtexec`. ONNX Runtime is optional when the
@@ -235,6 +242,11 @@ The direct runtime remains attached to SSH for live output. The GUI records its
 PID in the remote user's runtime directory, and Stop verifies that PID's
 command line before sending `SIGTERM`. It will not use broad `pkill` matching
 or stop a runtime it cannot identify.
+
+Live output and custom commands retain only the last 64 KiB per output channel
+in memory in addition to the bounded console display. Session logs on the Jetson
+still receive the complete direct-runtime stream. Check and model-list responses
+are retained in full for parsing.
 
 During direct inference, missing, undecodable, frozen, sentinel, or baseline
 input changes the GUI status to paused while leaving the managed process and

@@ -104,16 +104,21 @@ QString preparationInputCheck(const DiagnosticRuntimeOptions &options) {
   return check;
 }
 
-QString idleDetectorGuard() {
+QString idleServiceGuard() {
   return QStringLiteral(
       "service_state=\"$(systemctl is-active %1.service 2>/dev/null || true)\"; "
       "case \"$service_state\" in inactive|failed) ;; active|activating|reloading|deactivating) "
-      "printf 'Stop the service before preparing or activating a model.\\n' >&2; exit 3;; *) "
+      "printf 'Stop the service before starting direct inference or changing a model.\\n' >&2; exit 3;; *) "
       "test \"$(systemctl show --value -p LoadState %1.service 2>/dev/null || true)\" = not-found || "
-      "{ printf 'Cannot verify that the service is stopped. Check again.\\n' >&2; exit 3; };; esac; "
-      "%2; if test -s \"$pid_file\" && kill -0 \"$(cat -- \"$pid_file\")\" 2>/dev/null; then "
+      "{ printf 'Cannot verify that the service is stopped. Check again.\\n' >&2; exit 3; };; esac; ")
+      .arg(QString::fromLatin1(kServiceName));
+}
+
+QString idleDetectorGuard() {
+  return idleServiceGuard() + QStringLiteral(
+      "%1; if test -s \"$pid_file\" && kill -0 \"$(cat -- \"$pid_file\")\" 2>/dev/null; then "
       "printf 'Stop direct inference before preparing or activating a model.\\n' >&2; exit 3; fi; ")
-      .arg(QString::fromLatin1(kServiceName), stateVariables());
+      .arg(stateVariables());
 }
 
 QString serviceSchedulingCheck() {
@@ -438,8 +443,13 @@ QString validateRuntimeCommand(const DiagnosticRuntimeOptions &options) {
 }
 
 QString startDirectRuntimeCommand(const DiagnosticRuntimeOptions &options) {
+  // Serialize the idle check and PID publication with service starts and model
+  // deployment. Release before waiting so a running session never holds up
+  // other explicit controls; those controls check the published PID.
   QString command =
-      QStringLiteral("set -o pipefail; %1; ").arg(stateVariables());
+      QStringLiteral("set -euo pipefail; exec 9>.jetson-control-deployment.lock; "
+                     "flock -x 9; %1; ").arg(stateVariables());
+  command += idleServiceGuard();
   command +=
       QStringLiteral("mkdir -p -- \"$state_dir\"; chmod 700 -- \"$state_dir\"; "
                      "if test -s \"$pid_file\"; then "
@@ -462,11 +472,14 @@ QString startDirectRuntimeCommand(const DiagnosticRuntimeOptions &options) {
 
   command +=
       QStringLiteral(
-          "cleanup() { rm -f -- \"$pid_file\"; }; "
+          "cleanup() { flock -x 9 || return; "
+          "if test \"$(cat -- \"$pid_file\" 2>/dev/null || true)\" = \"${child_pid:-}\"; then "
+          "rm -f -- \"$pid_file\"; fi; flock -u 9; }; "
           "on_signal() { kill -TERM \"$child_pid\" 2>/dev/null || true; }; "
-          "trap cleanup EXIT; %1 & child_pid=$!; "
+          "trap cleanup EXIT; %1 9>&- & child_pid=$!; "
           "printf '%s\\n' \"$child_pid\" > \"$pid_file\"; "
           "trap on_signal HUP INT TERM; "
+          "flock -u 9; "
           "printf 'Direct inference started with PID %s\\n' \"$child_pid\"; "
           "status=0; wait \"$child_pid\" || status=$?; exit \"$status\"")
           .arg(runtime);
@@ -494,31 +507,6 @@ QString stopDirectRuntimeCommand() {
              "kill -TERM \"$pid\"; printf 'Sent SIGTERM to direct inference "
              "PID %s.\\n' \"$pid\"")
       .arg(stateVariables());
-}
-
-QString quickAvailabilityCheck(const DiagnosticRuntimeOptions & /* options */) {
-  const QString service = QString::fromLatin1(kServiceName);
-  const QString activeManifest = QString::fromLatin1(kActiveManifest);
-  const QString activeEngine = QString::fromLatin1(kActiveEngine);
-  return QStringLiteral(
-      "printf 'SSH connection successful\\n'; "
-      "service_state=\"$(systemctl is-active %1.service 2>/dev/null || true)\"; "
-      "printf '__SERVICE_STATE__=%s\\n' \"$service_state\"; "
-      "if [ \"$service_state\" = \"active\" ]; then "
-      "  printf '__SERVICE_ACTIVE__=%s\\n' \"yes\"; "
-      "else "
-      "  printf '__SERVICE_ACTIVE__=%s\\n' \"no\"; "
-      "fi; "
-      "if test -r %2 && test -r %3; then "
-      "  active_model=\"$(sed -n 's/^model_name=//p' %2 | tail -n 1)\"; "
-      "  active_variant=\"$(sed -n 's/^model_variant=//p' %2 | tail -n 1)\"; "
-      "  printf '__MODEL_READY__=%s\\n' \"yes\"; "
-      "  printf '__ACTIVE_MODEL__=%s\\n' \"$active_model\"; "
-      "  printf '__ACTIVE_VARIANT__=%s\\n' \"$active_variant\"; "
-      "else "
-      "  printf '__MODEL_READY__=%s\\n' \"no\"; "
-      "fi")
-      .arg(service, posixShellQuote(activeManifest), posixShellQuote(activeEngine));
 }
 
 QString availabilityProbeCommand(const DiagnosticRuntimeOptions &options) {
@@ -633,6 +621,29 @@ printf 'SSH connection successful\n';
           "test \"$active_source\" = \"${repo_root}/\"%5; }; then active_selection=yes; fi; ")
           .arg(posixShellQuote(activeManifest), modelName, variant,
                modelDirectory, posixShellQuote(QDir::cleanPath(options.bundleDirectory) + "/model"));
+  // The backend records the isolated source snapshot, not the published model
+  // directory. Recover that relationship without desktop session state. Require
+  // byte-identical configuration AND weights; matching names alone is insufficient.
+  const auto selected = QDir::cleanPath(options.modelDirectory) + '/';
+  const bool tuned = options.variant == "tuned";
+  command += QStringLiteral(R"SH(
+if test "$active_selection" = no && test "$active_model" = %1 && test "$active_variant" = %2; then
+  active_source_path=$(readlink -f -- "$active_source" 2>/dev/null || true)
+  case "$active_source_path" in "$repo_root"/build_native/prepared_models/*/model)
+    checkout_file() {
+      local resolved
+      resolved=$(readlink -f -- "$1") || return 1
+      case "$resolved" in "$repo_root"/*) test -f "$resolved";; *) return 1;; esac
+    }
+    if checkout_file %3 && checkout_file %4 &&
+       checkout_file "$active_source_path/train_config.json" && checkout_file "$active_source_path/best.pth" &&
+       cmp -s -- %3 "$active_source_path/train_config.json" &&
+       cmp -s -- %4 "$active_source_path/best.pth"; then active_selection=yes; fi
+  ;; esac
+fi
+)SH").arg(modelName, variant,
+           posixShellQuote(selected + (tuned ? "tuning/tuned_config.json" : "train_config.json")),
+           posixShellQuote(selected + (tuned ? "best_tuned.pth" : "best.pth")));
   command += QStringLiteral(
                  "if test -s \"$pid_file\" && "
                  "pid=\"$(cat -- \"$pid_file\")\" && "
@@ -752,7 +763,9 @@ QString deploymentStopCommand(bool password) {
       "case \"$state\" in active|inactive|failed) ;; *) echo 'Wait for the service to finish changing state.' >&2; exit 1;; esac\n"
       "systemctl stop \"$service\"\n");
 }
-QString deploymentStartCommand(bool password,const QString &manifest,const QString &config,const QString &runtime) {
+namespace {
+QString deploymentRunCommand(bool password, const QString &manifest, const QString &config,
+                             const QString &runtime, bool restart) {
   const QRegularExpression sha("^[0-9a-f]{64}$");
   for (const auto &value : {manifest,config,runtime})
     if (!sha.match(value).hasMatch()) return "echo 'Deployment revision unavailable; Check again.' >&2; exit 1";
@@ -760,6 +773,19 @@ QString deploymentStartCommand(bool password,const QString &manifest,const QStri
   const QMap<QString,QString> files{{"deploy/model/model.conf",manifest},{"config/native_uart_live.conf",config},{"build_native/inference/native_uart_live_runtime",runtime}};
   for(auto it=files.begin();it!=files.end();++it)
     script += "test \"$(sha256sum -- "+posixShellQuote(it.key())+" | cut -d ' ' -f1)\" = "+posixShellQuote(it.value())+" || { echo 'Deployment changed after validation; Check again.' >&2; exit 1; }\n";
-  script += "# DKFZ_DEPLOY_START\nsystemctl start \"$service\"\nsystemctl is-active --quiet \"$service\"\n";
+  script += restart ? "systemctl restart \"$service\"\n"
+                    : "# DKFZ_DEPLOY_START\nsystemctl start \"$service\"\n";
+  script += "systemctl is-active --quiet \"$service\"\n";
   return guardedServiceCommand(password,script);
+}
+} // namespace
+
+QString deploymentStartCommand(bool password, const QString &manifest, const QString &config,
+                               const QString &runtime) {
+  return deploymentRunCommand(password, manifest, config, runtime, false);
+}
+
+QString deploymentRestartCommand(bool password, const QString &manifest, const QString &config,
+                                 const QString &runtime) {
+  return deploymentRunCommand(password, manifest, config, runtime, true);
 }

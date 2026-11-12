@@ -12,6 +12,8 @@
 #include <QPushButton>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QShortcut>
+#include <QTextDocument>
 #ifndef Q_OS_WIN
 #include <unistd.h>
 #endif
@@ -33,6 +35,81 @@ QPushButton *button(MainWindow &window, const QString &text) {
 class DeploymentWorkflowTest final : public QObject {
   Q_OBJECT
 private slots:
+  void allChecksReadReadinessAndModels() {
+#ifdef Q_OS_WIN
+    QSKIP("Linux fake SSH host");
+#else
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const auto oldPath = qgetenv("PATH");
+    struct Restore { QByteArray path; ~Restore() { qputenv("PATH", path); } } restore{oldPath};
+    qputenv("PATH", dir.filePath("bin").toUtf8() + ':' + oldPath);
+    write(dir.filePath("bin/ssh"), "#!/bin/bash\nlast=${@: -1}\nif [[ $last == *__JCG_SERVICE__* ]]; then cat " +
+          posixShellQuote(dir.filePath("response")).toUtf8() + "; else exit 1; fi\n", true);
+    // The fake SSH response is independent of real systemd or sudo access.
+    MainWindow window({.host="fake", .remoteDirectory=dir.path()});
+    const auto name = window.modelNameEdit_->text().toUtf8();
+    const auto source = window.modelDirectoryEdit_->text().toUtf8();
+    const auto catalog = "__JCG_FINISHED_MODEL__=" + source.toBase64() + ":best:" +
+        ("{\"modelname\":\"" + name + "\"}").toBase64() + '\n';
+    const auto response = "__JCG_SERVICE__=yes\n__JCG_SERVICE_READY__=yes\n__JCG_SERVICE_STATE__=inactive\n"
+        "__JCG_RUNTIME__=yes\n__JCG_PREPARE__=yes\n__JCG_PREPARE_INPUTS__=yes\n"
+        "__JCG_CONFIG__=yes\n__JCG_MANIFEST__=yes\n__JCG_ENGINE__=yes\n__JCG_SLOT_METADATA__=yes\n"
+        "__JCG_ACTIVE_SELECTION__=yes\n__JCG_DIRECT_READY__=yes\n__JCG_DEPLOY_MANIFEST_REVISION__=" +
+        QByteArray(64, 'a') + "\n__JCG_DEPLOY_CONFIG_REVISION__=" + QByteArray(64, 'b') +
+        "\n__JCG_DEPLOY_RUNTIME_REVISION__=" + QByteArray(64, 'c') + '\n' + catalog;
+    write(dir.filePath("response"), response);
+    for (auto *check : {window.probeButton_, window.connectionCheckButton_, window.diagnosticCheckButton_}) {
+      check->click();
+      QTRY_VERIFY_WITH_TIMEOUT(!window.runner_.isRunning() && !window.recovery_.blocking() && !window.thresholds_.blocking(), 5000);
+      QCOMPARE(window.observedManifestRevision_, QString(64, 'a'));
+      QCOMPARE(window.finishedModelCombo_->count(), 2);
+      window.serviceSafetyCheck_->setChecked(true);
+      QVERIFY(window.serviceStartButton_->isEnabled());
+      QVERIFY(window.startInferenceButton_->isEnabled());
+    }
+    // Return and keypad Enter use the same Check action from both scopes.
+    int shortcuts = 0;
+    for (auto *shortcut : window.findChildren<QShortcut *>()) {
+      if (shortcut->key() != QKeySequence(Qt::Key_Return) && shortcut->key() != QKeySequence(Qt::Key_Enter)) continue;
+      window.observedManifestRevision_.clear();
+      QVERIFY(QMetaObject::invokeMethod(shortcut, "activated"));
+      QTRY_VERIFY_WITH_TIMEOUT(!window.runner_.isRunning() && !window.recovery_.blocking() && !window.thresholds_.blocking(), 5000);
+      QCOMPARE(window.observedManifestRevision_, QString(64, 'a'));
+      QVERIFY(window.serviceStartButton_->isEnabled());
+      ++shortcuts;
+    }
+    QCOMPARE(shortcuts, 4);
+#endif
+  }
+  void streamCaptureStaysBounded() {
+    MainWindow window;
+    window.console_->document()->setMaximumBlockCount(100);
+    QByteArray lines;
+    for (int i = 0; i < 2000; ++i) lines += QByteArray(80, 'x') + '\n';
+    for (const auto task : {MainWindow::TaskKind::serviceLogs, MainWindow::TaskKind::directInference, MainWindow::TaskKind::ordinary}) {
+      window.activeTask_ = task;
+      window.activeStandardOutput_.clear();
+      window.activeStandardError_.clear();
+      for (int i = 0; i < 3; ++i) {
+        window.runner_.standardOutputReceived(lines);
+        window.runner_.standardErrorReceived(lines);
+        QVERIFY(window.activeStandardOutput_.size() <= 64 * 1024);
+        QVERIFY(window.activeStandardError_.size() <= 64 * 1024);
+      }
+      QCOMPARE(window.activeStandardOutput_, lines.right(64 * 1024));
+      QVERIFY(window.console_->document()->blockCount() <= 100);
+    }
+    // Newline-free producers also have bounded pending and display buffers.
+    window.console_->clear();
+    window.runner_.standardOutputReceived(QByteArray(256 * 1024, 'x'));
+    QVERIFY(window.mainStandardOutputDisplayBuffer_.size() < 64 * 1024);
+    QVERIFY(window.console_->document()->blockCount() > 1);
+    // Finite machine-readable responses must remain complete beyond the tail limit.
+    window.activeTask_ = MainWindow::TaskKind::availabilityProbe;
+    window.activeStandardOutput_.clear();
+    window.runner_.standardOutputReceived(lines);
+    QCOMPARE(window.activeStandardOutput_, lines);
+  }
   void observesWorkerSchedulingWithoutInferringRealtime() {
 #ifdef Q_OS_WIN
     QSKIP("Linux fake SSH host");
@@ -43,19 +120,11 @@ private slots:
     qputenv("PATH", dir.path().toUtf8() + "/bin:" + oldPath);
     write(dir.filePath("bin/ssh"), R"SH(#!/bin/bash
 last=${@: -1}
-# Support both quick check and full probe modes
 if [[ $last == *__JCG_SERVICE__* ]]; then
  echo __JCG_SERVICE__=yes
  echo __JCG_SERVICE_STATE__=active
  echo __JCG_SERVICE_ACTIVE__=yes
  echo __JCG_SCHEDULING_PROFILE__=bounded_rr20
-elif [[ $last == *__SERVICE_STATE__* ]]; then
- # Quick check mode - return simplified output
- echo "__SERVICE_STATE__=active"
- echo "__SERVICE_ACTIVE__=yes"
- echo "__MODEL_READY__=yes"
- echo "__ACTIVE_MODEL__=test-model"
- echo "__ACTIVE_VARIANT__=best"
 elif [[ $last == *journalctl* ]]; then
  echo '{"code":"worker_scheduling","thread":"dkfz-acquire","requested_realtime_priority":20,"policy":"rr","priority":20,"realtime_applied":true,"degraded":false,"error":0}'
  echo '{"code":"worker_scheduling","thread":"dkfz-infer","requested_realtime_priority":20,"policy":"other","priority":0,"realtime_applied":false,"degraded":true,"error":1,"prerequisite_error":"bounded limit missing"}'
@@ -63,7 +132,7 @@ elif [[ $last == *journalctl* ]]; then
 fi
 )SH", true);
     MainWindow window({.host="fake", .remoteDirectory=dir.path()});
-    auto *check = button(window, "Quick check");
+    auto *check = button(window, "Check availability");
     auto *logs = button(window, "Follow log");
     check->click();
     QTRY_VERIFY_WITH_TIMEOUT(logs->isEnabled(), 5000);

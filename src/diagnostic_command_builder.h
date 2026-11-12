@@ -62,11 +62,11 @@ validateRuntimeCommand(const DiagnosticRuntimeOptions &options);
 startDirectRuntimeCommand(const DiagnosticRuntimeOptions &options);
 [[nodiscard]] QString stopDirectRuntimeCommand();
 [[nodiscard]] QString
-quickAvailabilityCheck(const DiagnosticRuntimeOptions &options);
-[[nodiscard]] QString
 availabilityProbeCommand(const DiagnosticRuntimeOptions &options);
 [[nodiscard]] QString rebuildRuntimeCommand();
 
 [[nodiscard]] QString deploymentStopCommand(bool sudoPasswordProvided);
 [[nodiscard]] QString deploymentStartCommand(bool sudoPasswordProvided,
+    const QString &manifestRevision, const QString &configRevision, const QString &runtimeRevision);
+[[nodiscard]] QString deploymentRestartCommand(bool sudoPasswordProvided,
     const QString &manifestRevision, const QString &configRevision, const QString &runtimeRevision);

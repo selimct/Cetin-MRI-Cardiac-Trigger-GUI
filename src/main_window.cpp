@@ -43,6 +43,17 @@
 
 namespace {
 constexpr auto kServiceName = "dkfz-native-uart-live";
+constexpr qsizetype kMaximumOutputTailBytes = 64 * 1024;
+
+void appendOutputTail(QByteArray &buffer, const QByteArray &data) {
+  if (data.size() >= kMaximumOutputTailBytes) {
+    buffer = data.right(kMaximumOutputTailBytes);
+  } else {
+    const auto excess = buffer.size() + data.size() - kMaximumOutputTailBytes;
+    if (excess > 0) buffer.remove(0, excess);
+    buffer.append(data);
+  }
+}
 
 QColor informationalColor() { return QColor(QStringLiteral("#4d9b58")); }
 
@@ -167,12 +178,9 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   connectionOuterLayout->addLayout(connectionLayout);
   connectionOuterLayout->addWidget(acceptNewHostKeyCheck_);
 
-  probeButton_ = new QPushButton(QStringLiteral("Quick check"), central);
+  probeButton_ = new QPushButton(QStringLiteral("Check availability"), central);
   probeButton_->setToolTip(QStringLiteral(
-      "Run a quick availability check (SSH connection, service state, model files)."));
-  fullProbeButton_ = new QPushButton(QStringLiteral("Full check"), central);
-  fullProbeButton_->setToolTip(QStringLiteral(
-      "Run the complete availability probe with all validations (service contract, runtime, config, manifest, engine, scheduling)."));
+      "Check SSH, models, service readiness and the direct runtime configuration."));
   connectionCheckButton_ =
       makeActionButton(QStringLiteral("Check"), connectionDialog);
   connectionCheckButton_->setToolTip(QStringLiteral(
@@ -503,7 +511,6 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   auto *topActions = new QHBoxLayout;
   topActions->addStretch();
   topActions->addWidget(probeButton_);
-  topActions->addWidget(fullProbeButton_);
   topActions->addWidget(connectionButton);
   mainLayout->addLayout(topActions);
   mainLayout->addWidget(operationsTabs_);
@@ -535,8 +542,6 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
 
   connect(probeButton_, &QPushButton::clicked, this,
           &MainWindow::checkAvailability);
-  connect(fullProbeButton_, &QPushButton::clicked, this,
-          &MainWindow::runFullAvailabilityProbe);
   connect(connectionCheckButton_, &QPushButton::clicked, this,
           &MainWindow::checkAvailability);
   connect(diagnosticCheckButton_, &QPushButton::clicked, this,
@@ -614,10 +619,8 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   });
   connect(serviceRestartButton_, &QPushButton::clicked, this, [this] {
     runCommand(QStringLiteral("Restart service"),
-               remoteSudoCommand(
-                   QStringLiteral("systemctl restart %1").arg(kServiceName)) +
-                   QStringLiteral(" && systemctl --no-pager --full status %1")
-                       .arg(kServiceName),
+               deploymentRestartCommand(!sudoPasswordEdit_->text().isEmpty(),
+                   observedManifestRevision_, observedConfigRevision_, observedRuntimeRevision_),
                TaskKind::serviceMutation);
   });
   connect(serviceLogsButton_, &QPushButton::clicked, this, [this] {
@@ -847,7 +850,14 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
           });
   connect(&runner_, &RemoteCommandRunner::standardOutputReceived, this,
           [this](const QByteArray &data) {
-            activeStandardOutput_.append(data);
+            // Only finite structured responses need complete capture. Live
+            // streams and arbitrary console commands retain a bounded tail.
+            if (activeTask_ == TaskKind::availabilityProbe || activeTask_ == TaskKind::listModels ||
+                activeTask_ == TaskKind::installModel) {
+              activeStandardOutput_.append(data);
+            } else {
+              appendOutputTail(activeStandardOutput_, data);
+            }
             if (activeTask_ != TaskKind::availabilityProbe && activeTask_ != TaskKind::listModels) {
               appendClassifiedConsoleBytes(mainStandardOutputDisplayBuffer_,
                                            data);
@@ -855,7 +865,7 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
           });
   connect(&runner_, &RemoteCommandRunner::standardErrorReceived, this,
           [this](const QByteArray &data) {
-            activeStandardError_.append(data);
+            appendOutputTail(activeStandardError_, data);
             appendClassifiedConsoleBytes(mainStandardErrorDisplayBuffer_, data);
           });
   connect(&runner_, &RemoteCommandRunner::failedToStart, this,
@@ -1123,12 +1133,17 @@ void MainWindow::appendClassifiedConsoleBytes(QByteArray &pending,
   pending.append(data);
   while (true) {
     const qsizetype newline = pending.indexOf('\n');
-    if (newline < 0) {
+    if (newline < 0 && pending.size() < kMaximumOutputTailBytes) {
       break;
     }
 
-    const QByteArray line = pending.left(newline + 1);
-    pending.remove(0, newline + 1);
+    // A producer that never writes a newline must not grow the pending buffer
+    // without limit. Ordinary backend JSON records fit within this limit.
+    const auto length = newline < 0 ? kMaximumOutputTailBytes
+                                   : qMin(newline + 1, kMaximumOutputTailBytes);
+    QByteArray line = pending.left(length);
+    pending.remove(0, length);
+    if (!line.endsWith('\n')) line.append('\n');
     applyRuntimeInputEvent(line);
     if (activeTask_ == TaskKind::installModel && line.startsWith("__JCG_")) continue;
     const ConsoleLineSeverity severity = classifyConsoleLine(line);
@@ -1266,24 +1281,6 @@ void MainWindow::checkAvailability() {
       QStringLiteral("Checking service availability…"));
   diagnosticAvailabilityLabel_->setText(
       QStringLiteral("Checking direct-runtime availability…"));
-  // Use quick check instead of full probe for faster response
-  runCommand(QStringLiteral("Quick check"),
-             quickAvailabilityCheck(options), TaskKind::availabilityProbe);
-}
-
-void MainWindow::runFullAvailabilityProbe() {
-  if (runner_.isRunning() || controlRunner_.isRunning() || thresholds_.blocking() || recovery_.blocking()) return;
-  const DiagnosticRuntimeOptions options = diagnosticOptions();
-  const QString error = validateDiagnosticOptions(options);
-  if (!error.isEmpty()) {
-    appendConsole(QStringLiteral("Error: %1\n").arg(error), elevatedColor());
-    statusLabel_->setText(error);
-    return;
-  }
-  serviceAvailabilityLabel_->setText(
-      QStringLiteral("Running full availability probe…"));
-  diagnosticAvailabilityLabel_->setText(
-      QStringLiteral("Running full availability probe…"));
   runCommand(QStringLiteral("Full availability probe"),
              availabilityProbeCommand(options), TaskKind::availabilityProbe);
 }
@@ -1303,9 +1300,6 @@ void MainWindow::invalidateAvailability() {
 }
 
 void MainWindow::applyAvailabilityProbe(const QByteArray &output) {
-  // Detect whether this is a quick check (no __JCG_SERVICE__ marker) or full probe
-  const bool isQuickCheck = !output.contains("__JCG_SERVICE__");
-
   const auto present = [&output](const char *marker) {
     return output.contains(QByteArray(marker) + "=yes");
   };
@@ -1327,70 +1321,35 @@ void MainWindow::applyAvailabilityProbe(const QByteArray &output) {
 
   capabilities_.known = true;
 
-  if (isQuickCheck) {
-    // Handle quick check output - simplified capability flags
-    capabilities_.service = output.contains("__SERVICE_STATE__");
-    capabilities_.serviceActive = present("__SERVICE_ACTIVE__");
-    capabilities_.manifest = present("__MODEL_READY__");
-    capabilities_.serviceEnabled = false;
-    capabilities_.serviceUnit = false;
-    capabilities_.serviceLinkedToCheckout = false;
-    capabilities_.serviceContract = false;
-    capabilities_.serviceReady = false;
-    capabilities_.runtime = false;
-    capabilities_.serviceConfig = false;
-    capabilities_.config = false;
-    capabilities_.engine = false;
-    capabilities_.activeSlotMetadata = false;
-    capabilities_.activeSelectionMatches = false;
-    capabilities_.directRuntimeReady = false;
-    capabilities_.prepareScript = false;
-    capabilities_.prepareInputs = false;
-    capabilities_.reexportInputs = false;
-    capabilities_.rebuildScript = false;
-    capabilities_.directInferenceActive = false;
-    capabilities_.serviceState = value("__SERVICE_STATE__");
-    capabilities_.activeModel = value("__ACTIVE_MODEL__");
-    capabilities_.activeVariant = value("__ACTIVE_VARIANT__");
-    capabilities_.activeSourceDirectory.clear();
-    capabilities_.serviceInputState.clear();
-    observedManifestRevision_.clear();
-    observedConfigRevision_.clear();
-    observedRuntimeRevision_.clear();
-
-    // Apply finished models only on full probe
-  } else {
-    // Handle full probe output (original behavior)
-    capabilities_.service = present("__JCG_SERVICE__");
-    capabilities_.serviceActive = present("__JCG_SERVICE_ACTIVE__");
-    capabilities_.serviceEnabled = present("__JCG_SERVICE_ENABLED__");
-    capabilities_.serviceUnit = present("__JCG_SERVICE_UNIT__");
-    capabilities_.serviceLinkedToCheckout = present("__JCG_SERVICE_LINKED__");
-    capabilities_.serviceContract = present("__JCG_SERVICE_CONTRACT__");
-    capabilities_.serviceReady = present("__JCG_SERVICE_READY__");
-    capabilities_.runtime = present("__JCG_RUNTIME__");
-    capabilities_.serviceConfig = present("__JCG_SERVICE_CONFIG__");
-    capabilities_.config = present("__JCG_CONFIG__");
-    capabilities_.manifest = present("__JCG_MANIFEST__");
-    capabilities_.engine = present("__JCG_ENGINE__");
-    capabilities_.activeSlotMetadata = present("__JCG_SLOT_METADATA__");
-    capabilities_.activeSelectionMatches = present("__JCG_ACTIVE_SELECTION__");
-    capabilities_.directRuntimeReady = present("__JCG_DIRECT_READY__");
-    capabilities_.prepareScript = present("__JCG_PREPARE__");
-    capabilities_.prepareInputs = present("__JCG_PREPARE_INPUTS__");
-    capabilities_.reexportInputs = present("__JCG_REEXPORT_INPUTS__");
-    capabilities_.rebuildScript = present("__JCG_REBUILD__");
-    capabilities_.directInferenceActive = present("__JCG_DIRECT_ACTIVE__");
-    capabilities_.activeModel = value("__JCG_ACTIVE_MODEL__");
-    capabilities_.activeVariant = value("__JCG_ACTIVE_VARIANT__");
-    capabilities_.activeSourceDirectory = value("__JCG_ACTIVE_SOURCE__");
-    capabilities_.serviceInputState = value("__JCG_SERVICE_INPUT__");
-    capabilities_.serviceState = value("__JCG_SERVICE_STATE__");
-    observedManifestRevision_ = value("__JCG_DEPLOY_MANIFEST_REVISION__");
-    observedConfigRevision_ = value("__JCG_DEPLOY_CONFIG_REVISION__");
-    observedRuntimeRevision_ = value("__JCG_DEPLOY_RUNTIME_REVISION__");
-    applyFinishedModels(output);
-  }
+  capabilities_.service = present("__JCG_SERVICE__");
+  capabilities_.serviceActive = present("__JCG_SERVICE_ACTIVE__");
+  capabilities_.serviceEnabled = present("__JCG_SERVICE_ENABLED__");
+  capabilities_.serviceUnit = present("__JCG_SERVICE_UNIT__");
+  capabilities_.serviceLinkedToCheckout = present("__JCG_SERVICE_LINKED__");
+  capabilities_.serviceContract = present("__JCG_SERVICE_CONTRACT__");
+  capabilities_.serviceReady = present("__JCG_SERVICE_READY__");
+  capabilities_.runtime = present("__JCG_RUNTIME__");
+  capabilities_.serviceConfig = present("__JCG_SERVICE_CONFIG__");
+  capabilities_.config = present("__JCG_CONFIG__");
+  capabilities_.manifest = present("__JCG_MANIFEST__");
+  capabilities_.engine = present("__JCG_ENGINE__");
+  capabilities_.activeSlotMetadata = present("__JCG_SLOT_METADATA__");
+  capabilities_.activeSelectionMatches = present("__JCG_ACTIVE_SELECTION__");
+  capabilities_.directRuntimeReady = present("__JCG_DIRECT_READY__");
+  capabilities_.prepareScript = present("__JCG_PREPARE__");
+  capabilities_.prepareInputs = present("__JCG_PREPARE_INPUTS__");
+  capabilities_.reexportInputs = present("__JCG_REEXPORT_INPUTS__");
+  capabilities_.rebuildScript = present("__JCG_REBUILD__");
+  capabilities_.directInferenceActive = present("__JCG_DIRECT_ACTIVE__");
+  capabilities_.activeModel = value("__JCG_ACTIVE_MODEL__");
+  capabilities_.activeVariant = value("__JCG_ACTIVE_VARIANT__");
+  capabilities_.activeSourceDirectory = value("__JCG_ACTIVE_SOURCE__");
+  capabilities_.serviceInputState = value("__JCG_SERVICE_INPUT__");
+  capabilities_.serviceState = value("__JCG_SERVICE_STATE__");
+  observedManifestRevision_ = value("__JCG_DEPLOY_MANIFEST_REVISION__");
+  observedConfigRevision_ = value("__JCG_DEPLOY_CONFIG_REVISION__");
+  observedRuntimeRevision_ = value("__JCG_DEPLOY_RUNTIME_REVISION__");
+  applyFinishedModels(output);
 
   if (capabilities_.serviceReady) {
     serviceAvailabilityLabel_->setText(
@@ -1414,42 +1373,34 @@ void MainWindow::applyAvailabilityProbe(const QByteArray &output) {
           QStringLiteral(" Input is usable and processing is running."));
     }
   } else if (capabilities_.service) {
-    if (isQuickCheck) {
-      // For quick check, show simplified status without detailed validation
+    QStringList reasons;
+    if (!capabilities_.serviceLinkedToCheckout) {
+      reasons.append(QStringLiteral(
+          "the installed unit is not linked to this checkout's deploy unit"));
+    }
+    if (!capabilities_.serviceContract) {
+      reasons.append(QStringLiteral(
+          "the bind path/account/groups/state directory/config sandbox is "
+          "invalid, or systemd needs daemon-reload"));
+    }
+    if (!capabilities_.runtime || !capabilities_.serviceConfig ||
+        !capabilities_.manifest || !capabilities_.engine ||
+        !capabilities_.activeSlotMetadata) {
+      reasons.append(QStringLiteral(
+          "the runtime, service config, or deploy/model slot is incomplete"));
+    }
+    if (reasons.isEmpty()) {
+      reasons.append(QStringLiteral("runtime or engine validation failed"));
+    }
+    serviceAvailabilityLabel_->setText(
+        QStringLiteral("The unit is installed but %1. Start and Restart "
+                       "remain disabled.")
+            .arg(reasons.join(QStringLiteral("; "))));
+    if (!capabilities_.serviceLinkedToCheckout && capabilities_.serviceUnit) {
       serviceAvailabilityLabel_->setText(
-          QStringLiteral("The systemd service is %1. Quick check completed - select Check for detailed validation.")
-              .arg(capabilities_.serviceState));
-    } else {
-      // Full probe - show detailed validation results
-      QStringList reasons;
-      if (!capabilities_.serviceLinkedToCheckout) {
-        reasons.append(QStringLiteral(
-            "the installed unit is not linked to this checkout's deploy unit"));
-      }
-      if (!capabilities_.serviceContract) {
-        reasons.append(QStringLiteral(
-            "the bind path/account/groups/state directory/config sandbox is "
-            "invalid, or systemd needs daemon-reload"));
-      }
-      if (!capabilities_.runtime || !capabilities_.serviceConfig ||
-          !capabilities_.manifest || !capabilities_.engine ||
-          !capabilities_.activeSlotMetadata) {
-        reasons.append(QStringLiteral(
-            "the runtime, service config, or deploy/model slot is incomplete"));
-      }
-      if (reasons.isEmpty()) {
-        reasons.append(QStringLiteral("runtime or engine validation failed"));
-      }
-      serviceAvailabilityLabel_->setText(
-          QStringLiteral("The unit is installed but %1. Start and Restart "
-                         "remain disabled.")
-              .arg(reasons.join(QStringLiteral("; "))));
-      if (!capabilities_.serviceLinkedToCheckout && capabilities_.serviceUnit) {
-        serviceAvailabilityLabel_->setText(
-            serviceAvailabilityLabel_->text() +
-            QStringLiteral(
-                " Stop the service, then select Install / repair unit link."));
-      }
+          serviceAvailabilityLabel_->text() +
+          QStringLiteral(
+              " Stop the service, then select Install / repair unit link."));
     }
   } else {
     serviceAvailabilityLabel_->setText(
@@ -1464,74 +1415,58 @@ void MainWindow::applyAvailabilityProbe(const QByteArray &output) {
                   "remain disabled."));
   }
 
-  if (!isQuickCheck) {
-    const auto scheduling = value("__JCG_SCHEDULING_PROFILE__");
-    serviceAvailabilityLabel_->setText(serviceAvailabilityLabel_->text() +
-        QString(" Observed service state: %1 (process state, not accuracy or timing validation).")
-            .arg(capabilities_.serviceState.isEmpty() ? "unknown" : capabilities_.serviceState));
-    serviceAvailabilityLabel_->setText(serviceAvailabilityLabel_->text() +
-        (scheduling == "bounded_rr20" ? " Requested service profile: bounded worker RR/20, RT CPU limit 200 ms; actual scheduling and timing require runtime evidence."
-         : scheduling == "legacy" ? " Requested service profile: legacy; worker scheduling unconfirmed."
-         : " Service scheduling profile: unknown or unsupported."));
-  } else {
-    serviceAvailabilityLabel_->setText(serviceAvailabilityLabel_->text() +
-        QString(" Observed service state: %1.").arg(capabilities_.serviceState.isEmpty() ? "unknown" : capabilities_.serviceState));
-  }
+  const auto scheduling = value("__JCG_SCHEDULING_PROFILE__");
+  serviceAvailabilityLabel_->setText(serviceAvailabilityLabel_->text() +
+      QString(" Observed service state: %1 (process state, not accuracy or timing validation).")
+          .arg(capabilities_.serviceState.isEmpty() ? "unknown" : capabilities_.serviceState));
+  serviceAvailabilityLabel_->setText(serviceAvailabilityLabel_->text() +
+      (scheduling == "bounded_rr20" ? " Requested service profile: bounded worker RR/20, RT CPU limit 200 ms; actual scheduling and timing require runtime evidence."
+       : scheduling == "legacy" ? " Requested service profile: legacy; worker scheduling unconfirmed."
+       : " Service scheduling profile: unknown or unsupported."));
+  QStringList available;
+  QStringList missing;
+  const auto addCapability = [&available, &missing](bool value,
+                                                    const QString &name) {
+    (value ? available : missing).append(name);
+  };
+  addCapability(capabilities_.runtime, QStringLiteral("runtime"));
+  addCapability(capabilities_.config, QStringLiteral("config"));
+  addCapability(capabilities_.manifest, QStringLiteral("active-slot manifest"));
+  addCapability(capabilities_.engine, QStringLiteral("active-slot engine"));
+  addCapability(capabilities_.activeSlotMetadata,
+                QStringLiteral("active-slot identity"));
+  addCapability(capabilities_.activeSelectionMatches,
+                QStringLiteral("selected model is active"));
+  addCapability(capabilities_.directRuntimeReady,
+                QStringLiteral("selected runtime validation"));
+  addCapability(capabilities_.prepareScript,
+                QStringLiteral("model preparation"));
+  addCapability(capabilities_.prepareInputs,
+                QStringLiteral("selected preparation inputs"));
+  addCapability(capabilities_.rebuildScript, QStringLiteral("build scripts"));
 
-  if (!isQuickCheck) {
-    QStringList available;
-    QStringList missing;
-    const auto addCapability = [&available, &missing](bool value,
-                                                      const QString &name) {
-      (value ? available : missing).append(name);
-    };
-    addCapability(capabilities_.runtime, QStringLiteral("runtime"));
-    addCapability(capabilities_.config, QStringLiteral("config"));
-    addCapability(capabilities_.manifest, QStringLiteral("active-slot manifest"));
-    addCapability(capabilities_.engine, QStringLiteral("active-slot engine"));
-    addCapability(capabilities_.activeSlotMetadata,
-                  QStringLiteral("active-slot identity"));
-    addCapability(capabilities_.activeSelectionMatches,
-                  QStringLiteral("selected model is active"));
-    addCapability(capabilities_.directRuntimeReady,
-                  QStringLiteral("selected runtime validation"));
-    addCapability(capabilities_.prepareScript,
-                  QStringLiteral("model preparation"));
-    addCapability(capabilities_.prepareInputs,
-                  QStringLiteral("selected preparation inputs"));
-    addCapability(capabilities_.rebuildScript, QStringLiteral("build scripts"));
-
-    QString message =
-        QStringLiteral("Available: %1.")
-            .arg(available.isEmpty() ? QStringLiteral("none")
-                                     : available.join(QStringLiteral(", ")));
-    if (!missing.isEmpty()) {
-      message +=
-          QStringLiteral(" Missing: %1.").arg(missing.join(QStringLiteral(", ")));
-    }
-    if (!capabilities_.activeModel.isEmpty()) {
-      message += QStringLiteral(" Active slot: %1 (%2), source %3.")
-                     .arg(capabilities_.activeModel, capabilities_.activeVariant,
-                          capabilities_.activeSourceDirectory);
-    }
-    if (capabilities_.serviceActive) {
-      message += QStringLiteral(
-          " Stop the service before preparing or replacing the active model.");
-    }
-    if (capabilities_.directInferenceActive) {
-      message +=
-          QStringLiteral(" A GUI-managed direct inference process is active.");
-    }
-    diagnosticAvailabilityLabel_->setText(message);
-  } else {
-    // Simplified message for quick check
-    QString message = QStringLiteral("Quick check completed.");
-    if (!capabilities_.activeModel.isEmpty()) {
-      message += QStringLiteral(" Active model: %1 (%2).")
-                     .arg(capabilities_.activeModel, capabilities_.activeVariant);
-    }
-    diagnosticAvailabilityLabel_->setText(message);
+  QString message =
+      QStringLiteral("Available: %1.")
+          .arg(available.isEmpty() ? QStringLiteral("none")
+                                   : available.join(QStringLiteral(", ")));
+  if (!missing.isEmpty()) {
+    message +=
+        QStringLiteral(" Missing: %1.").arg(missing.join(QStringLiteral(", ")));
   }
+  if (!capabilities_.activeModel.isEmpty()) {
+    message += QStringLiteral(" Active slot: %1 (%2), source %3.")
+                   .arg(capabilities_.activeModel, capabilities_.activeVariant,
+                        capabilities_.activeSourceDirectory);
+  }
+  if (capabilities_.serviceActive) {
+    message += QStringLiteral(
+        " Stop the service before preparing or replacing the active model.");
+  }
+  if (capabilities_.directInferenceActive) {
+    message +=
+        QStringLiteral(" A GUI-managed direct inference process is active.");
+  }
+  diagnosticAvailabilityLabel_->setText(message);
 
   appendConsole(QStringLiteral("SSH connection successful.\n%1\n")
                     .arg(serviceAvailabilityLabel_->text()),
@@ -1594,7 +1529,6 @@ void MainWindow::updateActionAvailability() {
   sudoPasswordEdit_->setEnabled(!anyBusy);
   acceptNewHostKeyCheck_->setEnabled(!anyBusy);
   probeButton_->setEnabled(!anyBusy);
-  fullProbeButton_->setEnabled(!anyBusy);
   connectionCheckButton_->setEnabled(!anyBusy);
   healthButton_->setEnabled(!anyBusy);
 
