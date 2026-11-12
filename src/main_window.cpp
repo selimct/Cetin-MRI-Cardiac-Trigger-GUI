@@ -293,6 +293,22 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   installationStateLabel_->setTextFormat(Qt::PlainText);
   finishedModelForm->addRow(ecg3SourceCheck_);
   finishedModelForm->addRow(installModelButton_);
+  savedBundleCombo_ = new QComboBox(modelDeploymentGroup);
+  savedBundleCombo_->setObjectName("savedBundleSelection");
+  savedBundleCombo_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+  savedBundleCombo_->setMinimumContentsLength(22);
+  savedBundleCombo_->addItem("Refresh to find saved engines");
+  savedBundleCombo_->setToolTip("Previous installations are kept under build_native/prepared_models/ on the Jetson. Entries match the selected model, variant and startup recovery policy; source bytes and validation are checked when reused.");
+  refreshBundlesButton_ = new QPushButton("Refresh saved engines", modelDeploymentGroup);
+  refreshBundlesButton_->setObjectName("refreshSavedBundles");
+  auto *savedBundleRow = new QHBoxLayout;
+  savedBundleRow->addWidget(savedBundleCombo_, 1);
+  savedBundleRow->addWidget(refreshBundlesButton_);
+  finishedModelForm->addRow("Saved engines", savedBundleRow);
+  reuseBundleButton_ = new QPushButton("Reuse saved engine", modelDeploymentGroup);
+  reuseBundleButton_->setObjectName("reuseSavedBundle");
+  reuseBundleButton_->setToolTip("Verify and activate this saved engine without ONNX export or TensorRT generation. The detector must be stopped. Start remains separate. To rebuild instead, use Install selected model.");
+  finishedModelForm->addRow(reuseBundleButton_);
   finishedModelForm->addRow(installationStateLabel_);
   finishedModelForm->addRow(preparationStateLabel_);
   finishedModelForm->addRow(activationStateLabel_);
@@ -649,8 +665,26 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
     activationStateLabel_->setText("Activation: checking fingerprints and activating prepared files…");
     runCommand("Activate prepared bundle", activatePreparedModelCommand(diagnosticOptions()), TaskKind::activateModel);
   });
+  connect(refreshBundlesButton_, &QPushButton::clicked, this, [this] {
+    runCommand("List saved engines", preparedBundlesCommand(), TaskKind::listBundles);
+  });
+  connect(savedBundleCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this,
+          [this] { updateActionAvailability(); });
+  connect(reuseBundleButton_, &QPushButton::clicked, this, [this] {
+    if (!reuseBundleButton_->isEnabled()) return;
+    const auto *bundle = selectedPreparedBundle();
+    if (!bundle) return;
+    const auto revision = bundle->reportRevision;
+    preparedBundleDirectory_ = bundle->directory;
+    bundlePrepared_ = false;
+    installStage_ = "reuse-validation";
+    installationStateLabel_->setText("Reusing saved engine… The service will stay stopped.");
+    activationStateLabel_->setText("Activation: waiting for saved-engine checks");
+    runCommand("Reuse saved engine", reuseModelCommand(diagnosticOptions(), revision), TaskKind::installModel);
+  });
   connect(refreshModelsButton_, &QPushButton::clicked, this, [this] {
-    runCommand(QStringLiteral("List finished models"), finishedModelsCommand(), TaskKind::listModels);
+    runCommand(QStringLiteral("List finished models and saved engines"),
+               finishedModelsCommand() + preparedBundlesCommand(), TaskKind::listModels);
   });
   connect(finishedModelCombo_, qOverload<int>(&QComboBox::activated), this, [this](int index) {
     if (index <= 0 || index > finishedModels_.size()) return;
@@ -750,6 +784,7 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
     workerSchedulingLabel_->setText("Worker scheduling: unobserved for this connection");
     runtimeTimingLabel_->setText("Runtime timing: unobserved for this connection");
     applyFinishedModels({});
+    applyPreparedBundles({});
     invalidateAvailability();
   };
   connect(hostEdit_, &QLineEdit::textChanged, this, invalidateConnection);
@@ -764,6 +799,7 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
     workerSchedulingLabel_->setText("Worker scheduling: unobserved for this checkout");
     runtimeTimingLabel_->setText("Runtime timing: unobserved for this checkout");
     applyFinishedModels({});
+    applyPreparedBundles({});
     invalidate();
   });
   connect(modelNameEdit_, &QLineEdit::textChanged, this,
@@ -830,8 +866,8 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
             QString displayCommand = command;
             if (activeTask_ == TaskKind::availabilityProbe) {
               displayCommand = QStringLiteral("[availability preflight]");
-            } else if (activeTask_ == TaskKind::listModels) {
-              displayCommand = QStringLiteral("[list finished models]");
+            } else if (activeTask_ == TaskKind::listModels || activeTask_ == TaskKind::listBundles) {
+              displayCommand = QStringLiteral("[list models/saved engines]");
             } else if (activeTask_ == TaskKind::serviceUnitRepair) {
               displayCommand =
                   QStringLiteral("[install/repair service unit link]");
@@ -852,13 +888,13 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
           [this](const QByteArray &data) {
             // Only finite structured responses need complete capture. Live
             // streams and arbitrary console commands retain a bounded tail.
-            if (activeTask_ == TaskKind::availabilityProbe || activeTask_ == TaskKind::listModels ||
+            if (activeTask_ == TaskKind::availabilityProbe || activeTask_ == TaskKind::listModels || activeTask_ == TaskKind::listBundles ||
                 activeTask_ == TaskKind::installModel) {
               activeStandardOutput_.append(data);
             } else {
               appendOutputTail(activeStandardOutput_, data);
             }
-            if (activeTask_ != TaskKind::availabilityProbe && activeTask_ != TaskKind::listModels) {
+            if (activeTask_ != TaskKind::availabilityProbe && activeTask_ != TaskKind::listModels && activeTask_ != TaskKind::listBundles) {
               appendClassifiedConsoleBytes(mainStandardOutputDisplayBuffer_,
                                            data);
             }
@@ -961,7 +997,9 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
       thresholds_.refresh();
     }
   });
-  connect(recoveryPanel_, &RecoveryPanel::deploymentPolicyChanged, this, [this] { invalidatePreparedBundle(); updateActionAvailability(); });
+  connect(recoveryPanel_, &RecoveryPanel::deploymentPolicyChanged, this, [this] {
+    invalidatePreparedBundle(); syncPreparedBundles(); updateActionAvailability();
+  });
   thresholds_.configure(connectionOptions(), sudoPasswordEdit_->text());
   connect(&thresholds_, &ThresholdController::changed, this, &MainWindow::updateActionAvailability);
   const auto configureThresholds = [this] {
@@ -1168,8 +1206,10 @@ void MainWindow::applyRuntimeInputEvent(const QByteArray &line) {
     installStage_ = QString::fromUtf8(line.mid(installPrefix.size()).trimmed());
     if (installStage_ == "preparation") {
       preparationStateLabel_->setText("Preparation: converting saved weights and checking the engine…");
+    } else if (installStage_ == "reuse-validation") {
+      preparationStateLabel_->setText("Saved engine: checking source bytes and the validation report; no conversion");
     } else if (installStage_ == "activation") {
-      preparationStateLabel_->setText("Preparation: conversion checks passed. Accuracy and sustained timing remain unverified.");
+      preparationStateLabel_->setText("Preparation: validation checks passed. Accuracy and sustained timing remain unverified.");
       activationStateLabel_->setText("Activation: verifying the report and installing checked files…");
     } else if (installStage_ == "verification") {
       activationStateLabel_->setText("Activation: checked files installed; service not started");
@@ -1350,6 +1390,7 @@ void MainWindow::applyAvailabilityProbe(const QByteArray &output) {
   observedConfigRevision_ = value("__JCG_DEPLOY_CONFIG_REVISION__");
   observedRuntimeRevision_ = value("__JCG_DEPLOY_RUNTIME_REVISION__");
   applyFinishedModels(output);
+  applyPreparedBundles(output);
 
   if (capabilities_.serviceReady) {
     serviceAvailabilityLabel_->setText(
@@ -1507,6 +1548,37 @@ void MainWindow::syncFinishedModelSelection() {
       : QStringLiteral("Refresh source models to read their trained timing contract; native validation is required."));
   recoveryPanel_->setDeploymentRecoverySupport(index > 0
       ? std::optional<bool>(finishedModels_.at(index - 1).recoverySupported) : std::nullopt);
+  syncPreparedBundles();
+}
+
+void MainWindow::applyPreparedBundles(const QByteArray &output) {
+  preparedBundles_ = parsePreparedBundles(output);
+  syncPreparedBundles();
+}
+
+const PreparedBundle *MainWindow::selectedPreparedBundle() const {
+  const auto directory = savedBundleCombo_->currentData().toString();
+  for (const auto &bundle : preparedBundles_)
+    if (bundle.directory == directory) return &bundle;
+  return nullptr;
+}
+
+void MainWindow::syncPreparedBundles() {
+  const auto previous = savedBundleCombo_->currentData().toString();
+  const auto options = diagnosticOptions();
+  const QSignalBlocker blocker(savedBundleCombo_);
+  savedBundleCombo_->clear();
+  for (const auto &bundle : preparedBundles_) {
+    if (bundle.modelName != options.modelName || bundle.variant != options.variant ||
+        bundle.forceRecoveryOff != options.forceRecoveryOff) continue;
+    savedBundleCombo_->addItem(QFileInfo(bundle.directory).fileName(), bundle.directory);
+    savedBundleCombo_->setItemData(savedBundleCombo_->count() - 1,
+        "Saved installation: " + bundle.directory + "\nSource config, weights and validation are rechecked on reuse.", Qt::ToolTipRole);
+  }
+  if (savedBundleCombo_->count() == 0)
+    savedBundleCombo_->addItem("No saved engines match this model and startup policy — refresh");
+  const auto index = savedBundleCombo_->findData(previous);
+  if (index >= 0) savedBundleCombo_->setCurrentIndex(index);
 }
 
 void MainWindow::updateActionAvailability() {
@@ -1563,6 +1635,11 @@ void MainWindow::updateActionAvailability() {
   modelNameEdit_->setEnabled(!anyBusy);
   finishedModelCombo_->setEnabled(!anyBusy);
   refreshModelsButton_->setEnabled(!anyBusy);
+  savedBundleCombo_->setEnabled(!anyBusy);
+  refreshBundlesButton_->setEnabled(!anyBusy);
+  reuseBundleButton_->setEnabled(!anyBusy && selectedPreparedBundle() && parametersValid &&
+      !pythonExecutableEdit_->text().trimmed().isEmpty() &&
+      !capabilities_.serviceActive && !capabilities_.directInferenceActive);
   modelDirectoryEdit_->setEnabled(!anyBusy);
   variantCombo_->setEnabled(!anyBusy);
   preparationModeCombo_->setEnabled(!anyBusy);
@@ -1646,8 +1723,13 @@ void MainWindow::finishMainCommand(int exitCode,
   } else if (completedTask == TaskKind::listModels && !cancelled &&
              exitStatus == QProcess::NormalExit && exitCode == 0) {
     applyFinishedModels(activeStandardOutput_);
+    applyPreparedBundles(activeStandardOutput_);
     appendConsole(QStringLiteral("Loaded %1 saved model variants from finished_models.\n")
                       .arg(finishedModels_.size()), informationalColor());
+  } else if (completedTask == TaskKind::listBundles && !cancelled &&
+             exitStatus == QProcess::NormalExit && exitCode == 0) {
+    applyPreparedBundles(activeStandardOutput_);
+    appendConsole(QString("Loaded %1 validated saved installations.\n").arg(preparedBundles_.size()), informationalColor());
   } else if (completedTask == TaskKind::availabilityProbe) {
     invalidateAvailability();
     thresholds_.invalidate();
@@ -1707,7 +1789,7 @@ void MainWindow::finishMainCommand(int exitCode,
       statusLabel_->setText("Model installation complete. Start the service when ready.");
     } else {
       capabilities_.serviceReady = false;
-      if (installStage_ == "preparation") {
+      if (installStage_ == "preparation" || installStage_ == "reuse-validation") {
         preparationStateLabel_->setText("Preparation: failed or cancelled; model was not activated");
         activationStateLabel_->setText("Activation: not attempted");
       } else if (installStage_ == "activation") {

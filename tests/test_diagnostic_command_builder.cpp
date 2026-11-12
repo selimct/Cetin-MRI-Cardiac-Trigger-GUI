@@ -11,6 +11,7 @@
 #include <QFile>
 #include <QDir>
 #include <QJsonDocument>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QTemporaryDir>
 #include <QCryptographicHash>
@@ -42,6 +43,7 @@ private slots:
   void directStartChecksServiceAndSerializesLaunch();
   void restartRejectsStaleDeployment();
   void recognizesInstalledSnapshotAfterReopening();
+  void discoversReusableBundles();
 };
 
 void DiagnosticCommandBuilderTest::delayedPredictionDiscovery() {
@@ -291,6 +293,9 @@ void DiagnosticCommandBuilderTest::generatedCommandsParseAsBash() {
       finishedModelsCommand(), reexportModelCommand(options), prepareStoppedModelCommand(options),
       activatePreparedModelCommand(options),
       installModelCommand(options),
+      preparedBundlesCommand(),
+      reuseModelCommand(DiagnosticRuntimeOptions{.modelName="target_r", .modelDirectory="models/target_r",
+          .bundleDirectory="build_native/prepared_models/quoted ' bundle"}, QString(64, 'a')),
       deploymentStopCommand(false), deploymentStopCommand(true),
       deploymentStartCommand(false, QString(64,'a'), QString(64,'b'), QString(64,'c')),
       deploymentRestartCommand(false, QString(64,'a'), QString(64,'b'), QString(64,'c')),
@@ -479,6 +484,50 @@ QProcessEnvironment fixtureEnvironment(const QTemporaryDir &dir) {
   env.insert("XDG_RUNTIME_DIR", dir.path());
   return env;
 }
+}
+
+void DiagnosticCommandBuilderTest::discoversReusableBundles() {
+#ifdef Q_OS_WIN
+  QSKIP("Linux fake host filesystem fixture");
+#else
+  QTemporaryDir dir; QVERIFY(dir.isValid());
+  QJsonObject report{{"schema", "dkfz-prepared-model-v1"}, {"modelname", "heart"}, {"model_variant", "best"},
+      {"validation_passed", true}, {"source_unchanged", true}, {"disable_recovery", false},
+      {"ecg3_source", "ecg2_minus_ecg1"},
+      {"stream_validation", QJsonObject{{"passed", true}, {"recordings", QJsonArray{QJsonObject{{"input", "recording"}}}}}},
+      {"sha256", QJsonObject{{"config", QString(64,'a')}, {"checkpoint", QString(64,'b')}, {"engine", QString(64,'c')}}}};
+  const auto bytes = QJsonDocument(report).toJson();
+  const auto add = [&](const QString &name, const QByteArray &data) {
+    const auto bundle = dir.filePath("build_native/prepared_models/" + name);
+    writeFixture(bundle + "/validation_report.json", data);
+    for (const auto *file : {"train_config.json", "best.pth", "model.engine"})
+      writeFixture(bundle + "/model/" + file, "artifact");
+  };
+  add("gui-heart-20261112-quoted ' bundle", bytes);
+  add("gui-heart-20261113-latest", bytes);
+  auto invalid = report; invalid["validation_passed"] = false; add("failed", QJsonDocument(invalid).toJson());
+  invalid = report; invalid["source_unchanged"] = false; add("changed-source", QJsonDocument(invalid).toJson());
+  invalid = report; invalid["sha256"] = QJsonObject{}; add("no-fingerprints", QJsonDocument(invalid).toJson());
+  invalid = report; invalid["stream_validation"] = QJsonObject{}; add("no-streams", QJsonDocument(invalid).toJson());
+  invalid = report; invalid["ecg3_source"] = "configured"; add("wrong-ecg", QJsonDocument(invalid).toJson());
+  add("malformed", "not JSON");
+  add("incomplete", bytes); QVERIFY(QFile::remove(dir.filePath("build_native/prepared_models/incomplete/model/model.engine")));
+  QTemporaryDir outside; QVERIFY(outside.isValid());
+  writeFixture(outside.filePath("report"), bytes);
+  add("escaped", bytes);
+  const auto escaped = dir.filePath("build_native/prepared_models/escaped/validation_report.json");
+  QVERIFY(QFile::remove(escaped)); QVERIFY(QFile::link(outside.filePath("report"), escaped));
+  QProcess process; process.setWorkingDirectory(dir.path());
+  process.start("bash", {"-c", preparedBundlesCommand()});
+  QVERIFY(process.waitForFinished(5000)); QCOMPARE(process.exitCode(), 0);
+  const auto bundles = parsePreparedBundles(process.readAllStandardOutput());
+  QCOMPARE(bundles.size(), 2);
+  QCOMPARE(bundles[0].directory, QString("build_native/prepared_models/gui-heart-20261113-latest"));
+  QCOMPARE(bundles[1].directory, QString("build_native/prepared_models/gui-heart-20261112-quoted ' bundle"));
+  QCOMPARE(bundles[0].reportRevision,
+      QString::fromLatin1(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex()));
+  QVERIFY(parsePreparedBundles("__JCG_PREPARED_BUNDLE__=" + QByteArray("../outside").toBase64() + ':' + bytes.toBase64() + '\n').isEmpty());
+#endif
 }
 
 void DiagnosticCommandBuilderTest::directStartChecksServiceAndSerializesLaunch() {

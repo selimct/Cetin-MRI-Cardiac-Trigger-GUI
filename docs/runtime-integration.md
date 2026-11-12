@@ -60,9 +60,31 @@ backend, with the selected variant and recovery policy. Fingerprint verification
 belongs to the backend and is repeated before replacement. Manual Prepare and
 Activate controls remain in the advanced section for diagnostics; editing inputs
 clears manual activation eligibility. Neither flow claims accuracy certification,
-runs paced qualification, measures hardware or imports an older prepared bundle.
+runs paced qualification or measures hardware.
 The GUI keeps successful and failed working directories for evidence/source
 readback; cleanup is manual. It never rewrites source weights or annotations.
+
+**Reuse saved engine** discovers prior bundles under
+`build_native/prepared_models/`, independent of desktop session state. Discovery
+uses shell/coreutils and local Qt JSON parsing, requires the report/config/weights/
+engine to remain within the bundle, and excludes failed, incomplete or unsupported
+reports. Report eligibility includes successful stream parity, source unchanged,
+the ECG2-minus-ECG1 confirmation and config/checkpoint/engine SHA256 fingerprints.
+Entries are filtered locally by selected model identity, best/tuned variant and
+startup recovery policy. Check, Refresh models and Refresh saved engines load
+the catalog; editing selections sends no SSH commands.
+
+Reuse takes the shared deployment lock, checks idle service/direct state, verifies
+the exact report revision read during discovery and compares the published config
+and weights to the bundle's normalized copies. It invokes the existing backend
+`check_prepared_model.py` and `deploy_model.sh --engine --validated-report` path,
+then performs the normal readiness probe. It does not export ONNX or build an
+engine; backend fingerprint, parity and native engine validation still run.
+Fresh validation recordings and a new ECG-source checkbox are unnecessary because
+the pinned report records that evidence. A changed source, changed report,
+invalid engine, recovery-policy mismatch or incompatible target fails explicitly;
+there is no automatic rebuild or service start. Install selected model remains
+the explicit full conversion path. No backend files or helper packages are added.
 
 Preparation and activation recheck idle service/direct-process state at execution
 time and share the GUI deployment lock with policy writes. They never stop or
@@ -135,6 +157,8 @@ automatic directories and standard/override recordings, ECG confirmation,
 combined install with separate service start, fingerprinted activation paths,
 best/tuned/recovery policies, rejected preparation/reports, failed readiness,
 stale activity and reinstallation,
+saved-engine discovery, best/tuned/recovery-policy filtering, reuse at both frame
+rates, source/report changes, rejected engines, idle guards and readiness failures,
 worker scheduling/degradation, health delays and unchanged emission coordinates.
 They do not execute target preparation/activation, use real weights, or start or
 stop a real service. Existing policy/SSH/configuration tests remain part of CTest.

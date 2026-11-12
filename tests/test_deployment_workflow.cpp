@@ -14,6 +14,10 @@
 #include <QTest>
 #include <QShortcut>
 #include <QTextDocument>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QCryptographicHash>
 #ifndef Q_OS_WIN
 #include <unistd.h>
 #endif
@@ -35,6 +39,169 @@ QPushButton *button(MainWindow &window, const QString &text) {
 class DeploymentWorkflowTest final : public QObject {
   Q_OBJECT
 private slots:
+  void reusesSavedEngine_data() {
+    QTest::addColumn<QString>("scenario");
+    for (const auto *scenario : {"50hz", "100hz", "tuned", "recovery-off", "changed-config", "changed-weights",
+         "changed-engine", "changed-report", "report-rejected", "stale-service", "stale-direct", "readiness-fails"})
+      QTest::newRow(scenario) << QString(scenario);
+  }
+  void reusesSavedEngine() {
+#ifdef Q_OS_WIN
+    QSKIP("Linux fake SSH host");
+#else
+    QFETCH(QString, scenario);
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const auto root = dir.path();
+    const auto oldPath = qgetenv("PATH"), oldRuntime = qgetenv("XDG_RUNTIME_DIR");
+    struct Restore {
+      QByteArray path, runtime;
+      ~Restore() { qputenv("PATH", path); if (runtime.isNull()) qunsetenv("XDG_RUNTIME_DIR"); else qputenv("XDG_RUNTIME_DIR", runtime); }
+    } restore{oldPath, oldRuntime};
+    qputenv("PATH", root.toUtf8() + "/bin:" + oldPath);
+    qputenv("XDG_RUNTIME_DIR", root.toUtf8());
+    write(root + "/scenario", scenario.toUtf8());
+    write(root + "/service-state", "inactive\n");
+    write(root + "/deploy/model/model.engine", "previous engine");
+    write(root + "/deploy/model/model.conf", "model_name=previous\nmodel_variant=best\nsource_model_dir=finished_models/previous\nthreshold=0.3\n");
+    write(root + "/bin/ssh", R"SH(#!/bin/bash
+last=${@: -1}
+last=${last/exec bash -lc/exec bash -c}
+test() {
+ if [[ $# == 2 && $1 == -d && $2 == /var/lib/dkfz-live ]]; then return 0; fi
+ builtin test "$@"
+}
+export -f test
+echo ssh >> ssh.calls
+exec bash -c "$last"
+)SH", true);
+    write(root + "/bin/id", "#!/bin/bash\nexit 0\n", true);
+    write(root + "/bin/getent", "#!/bin/bash\nexit 0\n", true);
+    write(root + "/bin/systemctl", R"SH(#!/bin/bash
+case "$1" in
+ is-active) cat service-state; [[ $(cat service-state) == active ]];;
+ cat) cat deploy/dkfz-native-uart-live.service;;
+ is-enabled) exit 1;;
+ show) case "$*" in
+  *FragmentPath*) echo "$PWD/deploy/dkfz-native-uart-live.service";;
+  *NeedDaemonReload*) echo no;;
+  *LoadState*) echo loaded;;
+ esac;;
+ *) echo "UNEXPECTED SERVICE MUTATION $*" >> actions; exit 1;;
+esac
+)SH", true);
+    const bool tuned = scenario == "tuned", recoveryOff = scenario == "recovery-off", delayed = scenario == "100hz";
+    const QString source = "finished_models/heart ' source";
+    const QString bundle = "build_native/prepared_models/gui-heart-20261113-quoted ' bundle";
+    const QString configPath = source + (tuned ? "/tuning/tuned_config.json" : "/train_config.json");
+    const QString weightsPath = source + (tuned ? "/best_tuned.pth" : "/best.pth");
+    QJsonObject config{{"modelname", "heart"}, {"recovery_head", !delayed}, {"raw_hz",400}, {"frame_size_raw",delayed ? 4 : 8}, {"window_size",delayed ? 100 : 50}};
+    if (delayed) { config["prediction_mode"] = "delayed_100hz"; config["prediction_delay_frames"] = 1; }
+    const auto configBytes = QJsonDocument(config).toJson();
+    write(root + '/' + configPath, configBytes);
+    write(root + '/' + weightsPath, "saved weights");
+    write(root + '/' + bundle + "/model/train_config.json", configBytes);
+    write(root + '/' + bundle + "/model/best.pth", "saved weights");
+    write(root + '/' + bundle + "/model/model.engine", "saved engine");
+    if (tuned) {
+      QVERIFY(QDir().mkpath(root + '/' + bundle + "/model/tuning"));
+      QVERIFY(QFile::link(root + '/' + bundle + "/model/train_config.json", root + '/' + bundle + "/model/tuning/tuned_config.json"));
+    }
+    const auto hash = [](const QByteArray &bytes) {
+      return QString::fromLatin1(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex());
+    };
+    QJsonObject report{{"schema","dkfz-prepared-model-v1"}, {"modelname","heart"}, {"model_variant",tuned ? "tuned" : "best"},
+        {"validation_passed",true}, {"source_unchanged",true}, {"disable_recovery",recoveryOff},
+        {"ecg3_source","ecg2_minus_ecg1"},
+        {"stream_validation",QJsonObject{{"passed",true},{"recordings",QJsonArray{QJsonObject{{"input","recording"}}}}}},
+        {"sha256",QJsonObject{{"config",hash(configBytes)},{"checkpoint",hash("saved weights")},{"engine",hash("saved engine")}}}};
+    write(root + '/' + bundle + "/validation_report.json", QJsonDocument(report).toJson());
+    // Other identities/policies and failed preparations must not be offered.
+    auto addReport = [&](const QString &name, QJsonObject other) {
+      const auto path = root + "/build_native/prepared_models/" + name;
+      write(path + "/validation_report.json", QJsonDocument(other).toJson());
+      for (const auto *file : {"train_config.json", "best.pth", "model.engine"}) write(path + "/model/" + file, "other");
+    };
+    auto other = report; other["modelname"] = "other"; addReport("other-model", other);
+    other = report; other["model_variant"] = tuned ? "best" : "tuned"; addReport("other-variant", other);
+    other = report; other["disable_recovery"] = !recoveryOff; addReport("other-policy", other);
+    other = report; other["validation_passed"] = false; addReport("failed", other);
+    write(root + "/bin/check-report", R"SH(#!/bin/bash
+set -eu
+echo validate >> actions
+printf '%s\n' "$@" > validation.args
+if flock -n .jetson-control-deployment.lock true; then exit 90; fi
+engine=
+while (( $# )); do if [[ $1 == --engine ]]; then engine=$2; fi; shift; done
+[[ $(cat scenario) != report-rejected ]]
+test "$(cat "$engine")" = 'saved engine'
+)SH", true);
+    write(root + "/run/deploy_model.sh", R"SH(#!/bin/bash
+set -eu
+if flock -n .jetson-control-deployment.lock true; then exit 90; fi
+printf '%s\n' "$@" > activation.args
+name=$1; shift
+model=; variant=
+while (( $# )); do
+ case $1 in --model-dir) model=$2;; --variant) variant=$2;; esac
+ shift
+done
+echo activate >> actions
+mkdir -p deploy/model
+cp -- "$model/model.engine" deploy/model/model.engine
+printf 'model_name=%s\nmodel_variant=%s\nsource_model_dir=%s\nthreshold=0.3\n' "$name" "$variant" "$model" > deploy/model/model.conf
+)SH", true);
+    write(root + "/build_native/inference/native_uart_live_runtime", "#!/bin/bash\n[[ $(cat scenario) != readiness-fails ]]\n", true);
+    write(root + "/config/native_uart_live.conf", "manifest_path=deploy/model/model.conf\ninput_reset_enabled=true\necg_baseline_reset_ms=100\nstuck_signal_reset_ms=100\ninput_recovery_ms=100\nwatchdog_enabled=true\nuart_timeout_ms=100\nsample_timeout_ms=100\n");
+    write(root + "/deploy/dkfz-native-uart-live.service", "WorkingDirectory=/opt/dkfz-live\nBindReadOnlyPaths=" + root.toUtf8() + ":/opt/dkfz-live\nReadWritePaths=/var/lib/dkfz-live\nExecStart=/opt/dkfz-live/build_native/inference/native_uart_live_runtime --config /opt/dkfz-live/config/native_uart_live.conf\n");
+    MainWindow window({.host="fake", .remoteDirectory=root});
+    window.pythonExecutableEdit_->setText(root + "/bin/check-report");
+    window.refreshModelsButton_->click();
+    QTRY_VERIFY_WITH_TIMEOUT(!window.runner_.isRunning(), 5000);
+    QCOMPARE(window.finishedModelCombo_->count(), 2);
+    const auto beforeSelection = read(root + "/ssh.calls");
+    window.finishedModelCombo_->setCurrentIndex(1);
+    QVERIFY(QMetaObject::invokeMethod(window.finishedModelCombo_, "activated", Q_ARG(int,1)));
+    if (recoveryOff) window.findChild<QComboBox *>("recoveryDeploymentPolicy")->setCurrentIndex(1);
+    QCOMPARE(read(root + "/ssh.calls"), beforeSelection); // Selection stays local.
+    QCOMPARE(window.savedBundleCombo_->count(), 1);
+    QCOMPARE(window.savedBundleCombo_->currentData().toString(), bundle);
+    QVERIFY(window.reuseBundleButton_->isEnabled());
+    if (scenario == "50hz") {
+      window.refreshBundlesButton_->click();
+      QTRY_VERIFY_WITH_TIMEOUT(!window.runner_.isRunning(), 5000);
+      QCOMPARE(window.savedBundleCombo_->currentData().toString(), bundle);
+      QVERIFY(window.reuseBundleButton_->isEnabled());
+    }
+    QVERIFY(!window.ecg3SourceCheck_->isChecked()); // Prior report carries the confirmation.
+    if (scenario == "changed-config") write(root + '/' + configPath, "changed config");
+    if (scenario == "changed-weights") write(root + '/' + weightsPath, "changed weights");
+    if (scenario == "changed-engine") write(root + '/' + bundle + "/model/model.engine", "changed engine");
+    if (scenario == "changed-report") write(root + '/' + bundle + "/validation_report.json", "changed report");
+    if (scenario == "stale-service") write(root + "/service-state", "active\n");
+    if (scenario == "stale-direct") write(root + "/dkfz-jetson-control-" + QString::number(getuid()) + "/native_uart_live_runtime.pid", QByteArray::number(QCoreApplication::applicationPid()));
+    window.reuseBundleButton_->click();
+    QTRY_VERIFY_WITH_TIMEOUT(!window.runner_.isRunning(), 10000);
+    const bool validationAttempted = !QStringList{"changed-config", "changed-weights", "changed-report", "stale-service", "stale-direct"}.contains(scenario);
+    const bool activated = validationAttempted && scenario != "changed-engine" && scenario != "report-rejected";
+    QCOMPARE(read(root + "/actions"), activated ? QByteArray("validate\nactivate\n") : validationAttempted ? QByteArray("validate\n") : QByteArray{});
+    QVERIFY(!QFile::exists(root + "/prepare_model.sh")); // Reuse cannot export or build.
+    QCOMPARE(read(root + "/service-state"), QByteArray(scenario == "stale-service" ? "active\n" : "inactive\n"));
+    if (activated) {
+      QCOMPARE(read(root + "/deploy/model/model.engine"), QByteArray("saved engine"));
+      const auto args = read(root + "/activation.args");
+      QVERIFY(args.contains("--validated-report\n" + bundle.toUtf8() + "/validation_report.json\n"));
+      QCOMPARE(args.contains("--no-recovery"), recoveryOff);
+      QCOMPARE(window.capabilities_.serviceReady, scenario != "readiness-fails");
+      if (scenario != "readiness-fails") {
+        window.serviceSafetyCheck_->setChecked(true);
+        QVERIFY(window.serviceStartButton_->isEnabled());
+      }
+    } else {
+      QVERIFY(!window.serviceStartButton_->isEnabled());
+      QCOMPARE(read(root + "/deploy/model/model.engine"), QByteArray("previous engine"));
+    }
+#endif
+  }
   void allChecksReadReadinessAndModels() {
 #ifdef Q_OS_WIN
     QSKIP("Linux fake SSH host");

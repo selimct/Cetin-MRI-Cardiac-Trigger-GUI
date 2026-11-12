@@ -8,11 +8,13 @@
 #include "recovery_state.h"
 
 #include <QDir>
+#include <QCryptographicHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QRegularExpression>
 #include <QStringList>
+#include <algorithm>
 #include <cmath>
 
 namespace {
@@ -277,9 +279,8 @@ fi
   return command;
 }
 
-QString activatePreparedModelCommand(const DiagnosticRuntimeOptions &options) {
-  const auto error = validatePreparationOptions(options);
-  if (!error.isEmpty()) return "printf '%s\\n' " + posixShellQuote(error) + " >&2; exit 2";
+namespace {
+QString activateCheckedBundleCommand(const DiagnosticRuntimeOptions &options) {
   const auto model = QDir::cleanPath(options.bundleDirectory) + "/model";
   QString command = "bash run/deploy_model.sh " + posixShellQuote(options.modelName) +
       " --variant " + posixShellQuote(options.variant) + " --model-dir " + posixShellQuote(model) +
@@ -292,6 +293,74 @@ QString activatePreparedModelCommand(const DiagnosticRuntimeOptions &options) {
   // Recheck activity at execution time as well as in the GUI. The backend
   // verifies fingerprints and checks the service again before replacing files.
   return idleDetectorGuard() + command;
+}
+} // namespace
+
+QString activatePreparedModelCommand(const DiagnosticRuntimeOptions &options) {
+  const auto error = validatePreparationOptions(options);
+  if (!error.isEmpty()) return "printf '%s\\n' " + posixShellQuote(error) + " >&2; exit 2";
+  return activateCheckedBundleCommand(options);
+}
+
+QString preparedBundlesCommand() {
+  return QString::fromUtf8(R"SH(
+bundle_root=$(pwd -P)
+for bundle in build_native/prepared_models/*; do
+  test -d "$bundle" || continue
+  resolved_bundle=$(readlink -f -- "$bundle") || continue
+  case "$resolved_bundle" in "$bundle_root"/build_native/prepared_models/*) ;; *) continue;; esac
+  complete=yes
+  for file in validation_report.json model/train_config.json model/best.pth model/model.engine; do
+    resolved_file=$(readlink -f -- "$bundle/$file") || { complete=no; break; }
+    case "$resolved_file" in "$resolved_bundle"/*) ;; *) complete=no; break;; esac
+    test -f "$resolved_file" && test -r "$resolved_file" || { complete=no; break; }
+  done
+  test "$complete" = yes || continue
+  test "$(stat -Lc %s -- "$bundle/validation_report.json")" -le 2097152 || continue
+  printf '__JCG_PREPARED_BUNDLE__='
+  printf '%s' "$bundle" | base64 -w0
+  printf ':'
+  base64 -w0 -- "$bundle/validation_report.json"
+  printf '\n'
+done
+)SH");
+}
+
+QList<PreparedBundle> parsePreparedBundles(const QByteArray &output) {
+  QList<PreparedBundle> bundles;
+  const QRegularExpression sha("^[0-9a-f]{64}$");
+  const QRegularExpression name("^[A-Za-z0-9._-]+$");
+  for (const auto &line : output.split('\n')) {
+    const QByteArray prefix = "__JCG_PREPARED_BUNDLE__=";
+    if (!line.startsWith(prefix)) continue;
+    const auto parts = line.mid(prefix.size()).split(':');
+    if (parts.size() != 2) continue;
+    const auto directory = QString::fromUtf8(QByteArray::fromBase64(parts[0]));
+    if (!isSafeRelativePath(directory, false) ||
+        !QDir::cleanPath(directory).startsWith("build_native/prepared_models/")) continue;
+    const auto bytes = QByteArray::fromBase64(parts[1]);
+    const auto report = QJsonDocument::fromJson(bytes).object();
+    const auto streams = report.value("stream_validation").toObject();
+    if (report.value("schema") != "dkfz-prepared-model-v1" ||
+        report.value("validation_passed") != true || report.value("source_unchanged") != true ||
+        report.value("ecg3_source") != "ecg2_minus_ecg1" ||
+        streams.value("passed") != true || streams.value("recordings").toArray().isEmpty() ||
+        !report.value("disable_recovery").isBool() ||
+        !name.match(report.value("modelname").toString()).hasMatch()) continue;
+    const auto variant = report.value("model_variant").toString();
+    if (variant != "best" && variant != "tuned") continue;
+    const auto hashes = report.value("sha256").toObject();
+    bool fingerprinted = true;
+    for (const auto &key : {"config", "checkpoint", "engine"})
+      fingerprinted = fingerprinted && sha.match(hashes.value(key).toString()).hasMatch();
+    if (!fingerprinted) continue;
+    bundles.append({QDir::cleanPath(directory), report.value("modelname").toString(), variant,
+                    report.value("disable_recovery").toBool(),
+                    QString::fromLatin1(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex())});
+  }
+  // GUI directory names contain UTC timestamps; newest installations sort first.
+  std::sort(bundles.begin(), bundles.end(), [](const auto &a, const auto &b) { return a.directory > b.directory; });
+  return bundles;
 }
 
 QString finishedModelsCommand() {
@@ -433,6 +502,53 @@ QString installModelCommand(const DiagnosticRuntimeOptions &options) {
       activatePreparedModelCommand(options) + "\n) || exit $?\n" +
       "printf '__JCG_INSTALL_STAGE__=verification\\n'\n(\n" +
       availabilityProbeCommand(options) + "\n) || exit $?\n";
+}
+
+QString reuseModelCommand(const DiagnosticRuntimeOptions &options, const QString &reportRevision) {
+  auto error = validateDiagnosticOptions(options);
+  const auto bundle = QDir::cleanPath(options.bundleDirectory);
+  if (!isSafeRelativePath(options.bundleDirectory, false) || !bundle.startsWith("build_native/prepared_models/"))
+    error = "Select a saved bundle under build_native/prepared_models/.";
+  if (options.pythonExecutable.isEmpty() || options.pythonExecutable.contains(QChar::Null) ||
+      options.pythonExecutable.contains('\n') || options.pythonExecutable.contains('\r'))
+    error = "Enter the Jetson Python executable.";
+  if (!QRegularExpression("^[0-9a-f]{64}$").match(reportRevision).hasMatch())
+    error = "Refresh saved engines before reusing a bundle.";
+  if (!error.isEmpty()) return "printf '%s\\n' " + posixShellQuote(error) + " >&2; exit 2";
+
+  const auto source = QDir::cleanPath(options.modelDirectory) + '/';
+  const bool tuned = options.variant == "tuned";
+  QString validation = idleDetectorGuard() + QStringLiteral(R"SH(
+root=$(pwd -P)
+bundle=$(readlink -f -- %1) || exit 2
+case "$bundle" in "$root"/build_native/prepared_models/*) ;; *) echo 'Saved bundle escapes the project.' >&2; exit 2;; esac
+for file in validation_report.json model/train_config.json model/best.pth model/model.engine; do
+  path=$(readlink -f -- "$bundle/$file") || exit 2
+  case "$path" in "$bundle"/*) ;; *) echo 'Saved artifact escapes its bundle.' >&2; exit 2;; esac
+  test -f "$path" && test -r "$path" || { echo 'Saved bundle is incomplete. Refresh or rebuild.' >&2; exit 2; }
+done
+for source in %2 %3; do
+  path=$(readlink -f -- "$source") || exit 2
+  case "$path" in "$root"/*) ;; *) echo 'Selected source escapes the project.' >&2; exit 2;; esac
+done
+test "$(sha256sum -- "$bundle/validation_report.json" | cut -d ' ' -f1)" = %4 || {
+  echo 'Saved validation report changed. Refresh saved engines.' >&2; exit 2;
+}
+cmp -s -- %2 "$bundle/model/train_config.json" && cmp -s -- %3 "$bundle/model/best.pth" || {
+  echo 'Saved engine belongs to different source config or weights. Select another bundle or install again.' >&2; exit 2;
+}
+)SH").arg(posixShellQuote(bundle),
+           posixShellQuote(source + (tuned ? "tuning/tuned_config.json" : "train_config.json")),
+           posixShellQuote(source + (tuned ? "best_tuned.pth" : "best.pth")), posixShellQuote(reportRevision));
+  const auto model = bundle + "/model";
+  validation += posixShellQuote(options.pythonExecutable) + " run/check_prepared_model.py --report " +
+      posixShellQuote(bundle + "/validation_report.json") + " --config " + posixShellQuote(model + "/train_config.json") +
+      " --checkpoint " + posixShellQuote(model + "/best.pth") + " --engine " + posixShellQuote(model + "/model.engine") +
+      " --model-variant " + posixShellQuote(options.variant);
+  if (options.forceRecoveryOff) validation += " --no-recovery";
+  return "printf '__JCG_INSTALL_STAGE__=reuse-validation\\n'\n(\n" + validation + "\n) || exit $?\n" +
+      "printf '__JCG_INSTALL_STAGE__=activation\\n'\n(\n" + activateCheckedBundleCommand(options) + "\n) || exit $?\n" +
+      "printf '__JCG_INSTALL_STAGE__=verification\\n'\n(\n" + availabilityProbeCommand(options) + "\n) || exit $?\n";
 }
 
 QString validateRuntimeCommand(const DiagnosticRuntimeOptions &options) {
@@ -712,6 +828,7 @@ fi
                             "else printf '__JCG_REEXPORT_INPUTS__=no\\n'; fi; ")
                  .arg(preparationInputCheck(complete));
   command += finishedModelsCommand();
+  command += preparedBundlesCommand();
   // Pin the active deployment for a subsequent explicit service start.
   // This reads files only; it never probes an installer or transfers binaries.
   command += QString::fromUtf8(R"SH(

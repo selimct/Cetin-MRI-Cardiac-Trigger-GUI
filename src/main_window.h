@@ -43,6 +43,7 @@ private:
     ordinary,
     availabilityProbe,
     listModels,
+    listBundles,
     serviceMutation,
     serviceUnitRepair,
     serviceLogs,
@@ -104,6 +105,9 @@ private:
   void applyAvailabilityProbe(const QByteArray &output);
   void applyFinishedModels(const QByteArray &output);
   void syncFinishedModelSelection();
+  void applyPreparedBundles(const QByteArray &output);
+  void syncPreparedBundles();
+  const PreparedBundle *selectedPreparedBundle() const;
   void updateActionAvailability();
   void updateDiagnosticModeControls();
   void finishMainCommand(int exitCode, QProcess::ExitStatus exitStatus,
@@ -157,6 +161,10 @@ private:
   QComboBox *finishedModelCombo_{nullptr};
   QPushButton *refreshModelsButton_{nullptr};
   QList<FinishedModel> finishedModels_;
+  QList<PreparedBundle> preparedBundles_;
+  QComboBox *savedBundleCombo_{nullptr};
+  QPushButton *refreshBundlesButton_{nullptr};
+  QPushButton *reuseBundleButton_{nullptr};
   QLineEdit *modelNameEdit_{nullptr};
   QLineEdit *modelDirectoryEdit_{nullptr};
   QComboBox *variantCombo_{nullptr};

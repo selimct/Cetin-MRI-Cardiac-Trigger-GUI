@@ -56,6 +56,30 @@ source copies, generated artifacts, logs and the fingerprinted validation report
 you do not need to name or manage them to install a model. Keep them for saved
 source readback and troubleshooting. Reinstallation creates a new directory.
 
+To switch back to a previously installed model without rebuilding it:
+
+1. Select its **Finished models** entry and matching startup recovery policy.
+2. Click **Refresh saved engines** (Check and Refresh models also load these).
+3. Choose its saved installation under **Saved engines**, then click **Reuse saved engine**
+   with the detector stopped.
+4. When readiness is confirmed, review the hardware confirmation and click **Start**.
+
+These bundles are on the Jetson under `build_native/prepared_models/`, separate
+from the source weights in `finished_models/`. Each contains
+`model/train_config.json`, `model/best.pth`, `model/model.engine` and
+`validation_report.json`, alongside other conversion evidence. Saved-engine
+discovery includes only complete bundles with a successful fingerprinted report
+and recorded stream parity. The selector filters by model, variant and startup
+recovery policy. On reuse, exact source config/weights and the saved report are
+rechecked; the backend verifies artifact fingerprints, checks the existing engine
+and performs its activation validation. Reuse does not export ONNX or generate
+a TensorRT engine. It uses the report's previous ECG-source confirmation and
+recording evidence, so no fresh recording paths or ECG checkbox are required.
+The backend's Jetson Python/parity environment is still required for activation.
+Failed checks leave the result unconfirmed and never fall back to rebuilding.
+Use **Install selected model** when a new conversion is needed. Keep the complete
+bundle and the corresponding source config/weights for future reuse.
+
 Validation recordings are recorded raw ECG replayed to check that conversion
 preserves probabilities and trigger coordinates. They are not used to retrain
 or tune the model. Installation automatically uses whichever standard fixtures
@@ -454,11 +478,25 @@ workflow is also manual-only; neither workflow runs for ordinary pushes.
 
 ## Build on Linux
 
-Clone this GUI repository wherever you keep desktop applications, then run the
-following from its root:
+From the repository directory, configure and compile a Release build with:
 
 ```bash
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+./build.sh
+./build/jetson-control
+```
+
+Use `./build.sh --test` to also build and run all tests. Add `--debug` for a
+Debug build, `--jobs 2` to limit parallel compilation, or `--build-dir PATH`
+to choose another build directory. The script also works when invoked by its
+absolute path from another directory. Run `./build.sh --help` for details.
+It uses Ninja for new builds when available and reuses the generator in existing
+build directories. For a custom Qt installation, set `CMAKE_PREFIX_PATH` to its
+installation prefix before running the script.
+
+To configure a Debug build and run tests manually:
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
 cmake --build build
 ctest --test-dir build --output-on-failure
 ./build/jetson-control

@@ -26,6 +26,17 @@ struct FinishedModel {
 [[nodiscard]] QString finishedModelsCommand();
 [[nodiscard]] QList<FinishedModel> parseFinishedModels(const QByteArray &output);
 
+struct PreparedBundle {
+  QString directory;
+  QString modelName;
+  QString variant;
+  bool forceRecoveryOff{false};
+  QString reportRevision;
+};
+
+[[nodiscard]] QString preparedBundlesCommand();
+[[nodiscard]] QList<PreparedBundle> parsePreparedBundles(const QByteArray &output);
+
 struct DiagnosticRuntimeOptions {
   QString modelName;
   QString modelDirectory;
@@ -49,6 +60,8 @@ validateDiagnosticOptions(const DiagnosticRuntimeOptions &options);
 [[nodiscard]] QString validatePreparationOptions(const DiagnosticRuntimeOptions &options);
 [[nodiscard]] QString activatePreparedModelCommand(const DiagnosticRuntimeOptions &options);
 [[nodiscard]] QString installModelCommand(const DiagnosticRuntimeOptions &options);
+[[nodiscard]] QString reuseModelCommand(const DiagnosticRuntimeOptions &options,
+                                       const QString &reportRevision);
 [[nodiscard]] QString diagnosticManifestPath();
 [[nodiscard]] QString serviceUnitRepairCommand(bool sudoPasswordProvided);
 [[nodiscard]] QString
