@@ -3,8 +3,14 @@
 ; Developed at the German Cancer Research Center (DKFZ).
 
 [ssh]
+; SSH hostname, IP address, or an alias from the desktop's ~/.ssh/config.
 host=192.168.1.50
+; Leave user empty to use the SSH alias/user default. Port is always explicit.
 user=orin
 port=22
+; Desktop key path. Relative paths start beside this INI; ~ is not expanded.
 identity_file=jetson_ed25519
+; Absolute checkout path ON THE JETSON, not the service's /opt/dkfz-live mount.
 remote_directory=/home/orin/work/live_stack
+; Connection-dialog edits are session-only. Edit this file for launch defaults.
+; Never put the optional remote sudo password in this file.

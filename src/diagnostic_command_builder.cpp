@@ -12,6 +12,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLocale>
 #include <QRegularExpression>
 #include <QStringList>
 #include <algorithm>
@@ -326,6 +327,19 @@ done
 )SH");
 }
 
+QString PreparedBundle::displayName() const {
+  const QString date = preparedAt.isValid()
+      ? QLocale().toString(preparedAt.toLocalTime(), "d MMM yyyy HH:mm:ss")
+      : QStringLiteral("Date unavailable");
+  const QString numericPrecision = precision == "fp16" ? "FP16" : precision == "fp32" ? "FP32"
+                                                                                   : "Precision unavailable";
+  const QString rate = frameHz > 0 && std::isfinite(frameHz)
+      ? QString("%1 Hz").arg(frameHz, 0, 'g', 6) : "Rate unavailable";
+  return QStringList{modelName, variant == "tuned" ? "Fine-tuned" : "Best", date,
+                     numericPrecision, rate, forceRecoveryOff ? "Recovery off" : "Saved recovery settings"}
+      .join(QStringLiteral(" — "));
+}
+
 QList<PreparedBundle> parsePreparedBundles(const QByteArray &output) {
   QList<PreparedBundle> bundles;
   const QRegularExpression sha("^[0-9a-f]{64}$");
@@ -354,9 +368,25 @@ QList<PreparedBundle> parsePreparedBundles(const QByteArray &output) {
     for (const auto &key : {"config", "checkpoint", "engine"})
       fingerprinted = fingerprinted && sha.match(hashes.value(key).toString()).hasMatch();
     if (!fingerprinted) continue;
-    bundles.append({QDir::cleanPath(directory), report.value("modelname").toString(), variant,
-                    report.value("disable_recovery").toBool(),
-                    QString::fromLatin1(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex())});
+    PreparedBundle bundle;
+    bundle.directory = QDir::cleanPath(directory);
+    bundle.modelName = report.value("modelname").toString();
+    bundle.variant = variant;
+    bundle.forceRecoveryOff = report.value("disable_recovery").toBool();
+    bundle.reportRevision = QString::fromLatin1(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex());
+    bundle.precision = report.value("precision").toString();
+    bundle.frameHz = report.value("frame_hz").toDouble();
+    // Automatic bundle names record preparation start in UTC. Preserve that
+    // instant and display it in the desktop's local time zone; never guess a
+    // date from a custom folder name or infer precision from its filename.
+    const QRegularExpression timestamp("^gui-" + QRegularExpression::escape(bundle.modelName) +
+        "-([0-9]{4})([0-9]{2})([0-9]{2})-([0-9]{2})([0-9]{2})([0-9]{2})-");
+    const auto match = timestamp.match(QDir(bundle.directory).dirName());
+    if (match.hasMatch())
+      bundle.preparedAt = QDateTime::fromString(QString("%1-%2-%3T%4:%5:%6Z")
+          .arg(match.captured(1), match.captured(2), match.captured(3),
+               match.captured(4), match.captured(5), match.captured(6)), Qt::ISODate);
+    bundles.append(bundle);
   }
   // GUI directory names contain UTC timestamps; newest installations sort first.
   std::sort(bundles.begin(), bundles.end(), [](const auto &a, const auto &b) { return a.directory > b.directory; });
@@ -473,7 +503,68 @@ QList<FinishedModel> parseFinishedModels(const QByteArray &output) {
 }
 
 QString prepareStoppedModelCommand(const DiagnosticRuntimeOptions &options) {
-  QString command = idleDetectorGuard() + prepareModelCommand(options);
+  if (!validatePreparationOptions(options).isEmpty())
+    return idleDetectorGuard() + prepareModelCommand(options);
+  // The backend keeps conversion/parity subprocess output in bundle log files.
+  // Stream their new bytes while it runs, then drain once after exit so even
+  // short-lived or failed stages are visible. Python is already required for
+  // preparation; no helper files or packages are installed on the target.
+  const auto streamer = QString::fromUtf8(R"PY(
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+bundle = Path(sys.argv[1])
+offsets = {}
+child = subprocess.Popen(["bash", "-c", "gui_prepare_model"],
+    env=dict(os.environ, PYTHONUNBUFFERED="1"), start_new_session=True)
+
+def forward(signum, frame=None):
+    if child.poll() is None:
+        try:
+            os.killpg(child.pid, signum)
+        except ProcessLookupError:
+            pass
+
+for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    signal.signal(signum, forward)
+
+def drain():
+    for path in sorted(bundle.rglob("*.log")):
+        try:
+            with path.open("rb") as source:
+                position = offsets.get(path, 0)
+                if os.fstat(source.fileno()).st_size < position:
+                    position = 0
+                source.seek(position)
+                while True:
+                    data = source.read(65536)
+                    if not data:
+                        break
+                    sys.stdout.buffer.write(data)
+                    sys.stdout.buffer.flush()
+                offsets[path] = source.tell()
+        except FileNotFoundError:
+            continue
+
+try:
+    while child.poll() is None:
+        drain()
+        time.sleep(0.1)
+    drain()
+    status = child.wait()
+finally:
+    forward(signal.SIGTERM)
+sys.exit(status if status >= 0 else 128 - status)
+)PY");
+  QString command = idleDetectorGuard() + "test ! -e " + posixShellQuote(QDir::cleanPath(options.bundleDirectory)) +
+      " || { echo 'Choose a new bundle directory; this one already exists.' >&2; exit 2; }\n"
+      "gui_prepare_model() {\n" + prepareModelCommand(options) +
+      "\n}\nexport -f gui_prepare_model\n" + posixShellQuote(options.pythonExecutable) + " -u -c " +
+      posixShellQuote(streamer) + " " + posixShellQuote(QDir::cleanPath(options.bundleDirectory));
   if (options.variant == "tuned" && validatePreparationOptions(options).isEmpty()) {
     // Isolated preparation normalizes the copied tuned config to train_config.json.
     // Preserve the backend recovery helper's variant-based source lookup without
@@ -496,12 +587,12 @@ QString installModelCommand(const DiagnosticRuntimeOptions &options) {
   if (!error.isEmpty()) return "printf '%s\\n' " + posixShellQuote(error) + " >&2; exit 2";
   // Keep the report and all intermediate artifacts in the new working directory.
   // Each subshell must succeed before the next stage; no service mutation occurs.
-  return "printf '__JCG_INSTALL_STAGE__=preparation\\n'\n(\n" +
+  return "printf '\\n__JCG_INSTALL_STAGE__=preparation\\n'\n(\n" +
       prepareStoppedModelCommand(options) + "\n) || exit $?\n" +
-      "printf '__JCG_INSTALL_STAGE__=activation\\n'\n(\n" +
+      "printf '\\n__JCG_INSTALL_STAGE__=activation\\n'\n(\n" +
       activatePreparedModelCommand(options) + "\n) || exit $?\n" +
-      "printf '__JCG_INSTALL_STAGE__=verification\\n'\n(\n" +
-      availabilityProbeCommand(options) + "\n) || exit $?\n";
+      "printf '\\n__JCG_INSTALL_STAGE__=verification\\n'\n(\n" +
+      availabilityProbeCommand(options, true) + "\n) || exit $?\n";
 }
 
 QString reuseModelCommand(const DiagnosticRuntimeOptions &options, const QString &reportRevision) {
@@ -546,9 +637,9 @@ cmp -s -- %2 "$bundle/model/train_config.json" && cmp -s -- %3 "$bundle/model/be
       " --checkpoint " + posixShellQuote(model + "/best.pth") + " --engine " + posixShellQuote(model + "/model.engine") +
       " --model-variant " + posixShellQuote(options.variant);
   if (options.forceRecoveryOff) validation += " --no-recovery";
-  return "printf '__JCG_INSTALL_STAGE__=reuse-validation\\n'\n(\n" + validation + "\n) || exit $?\n" +
-      "printf '__JCG_INSTALL_STAGE__=activation\\n'\n(\n" + activateCheckedBundleCommand(options) + "\n) || exit $?\n" +
-      "printf '__JCG_INSTALL_STAGE__=verification\\n'\n(\n" + availabilityProbeCommand(options) + "\n) || exit $?\n";
+  return "printf '\\n__JCG_INSTALL_STAGE__=reuse-validation\\n'\n(\n" + validation + "\n) || exit $?\n" +
+      "printf '\\n__JCG_INSTALL_STAGE__=activation\\n'\n(\n" + activateCheckedBundleCommand(options) + "\n) || exit $?\n" +
+      "printf '\\n__JCG_INSTALL_STAGE__=verification\\n'\n(\n" + availabilityProbeCommand(options, true) + "\n) || exit $?\n";
 }
 
 QString validateRuntimeCommand(const DiagnosticRuntimeOptions &options) {
@@ -596,7 +687,6 @@ QString startDirectRuntimeCommand(const DiagnosticRuntimeOptions &options) {
           "printf '%s\\n' \"$child_pid\" > \"$pid_file\"; "
           "trap on_signal HUP INT TERM; "
           "flock -u 9; "
-          "printf 'Direct inference started with PID %s\\n' \"$child_pid\"; "
           "status=0; wait \"$child_pid\" || status=$?; exit \"$status\"")
           .arg(runtime);
   return command;
@@ -625,7 +715,7 @@ QString stopDirectRuntimeCommand() {
       .arg(stateVariables());
 }
 
-QString availabilityProbeCommand(const DiagnosticRuntimeOptions &options) {
+QString availabilityProbeCommand(const DiagnosticRuntimeOptions &options, bool showValidationOutput) {
   const QString config = posixShellQuote(QDir::cleanPath(options.configPath));
   const QString modelName = posixShellQuote(options.modelName);
   const QString modelDirectory =
@@ -648,7 +738,6 @@ for entry in MANIFEST:deploy/model/model.conf CONFIG:config/native_uart_live.con
   key=${entry%%:*}; path=${entry#*:}
   if test -r "$path"; then gui_revision_before[$key]=$(sha256sum -- "$path" | cut -d ' ' -f1); else gui_revision_before[$key]=missing; fi
 done
-printf 'SSH connection successful\n';
 )SH");
   command +=
       QStringLiteral("repo_root=\"$(pwd -P)\"; %1; ").arg(stateVariables());
@@ -765,9 +854,9 @@ fi
                  "pid=\"$(cat -- \"$pid_file\")\" && "
                  "kill -0 \"$pid\" 2>/dev/null; then direct_active=yes; fi; "
                  "if test \"$service_active\" = no && "
-                 "test \"$direct_active\" = no && %1 >/dev/null 2>&1; then "
+                 "test \"$direct_active\" = no && %1; then "
                  "direct_validation=yes; fi; ")
-                 .arg(directValidation);
+                 .arg(directValidation + (showValidationOutput ? "" : " >/dev/null 2>&1"));
   command +=
       QStringLiteral(
           "if test \"$service_installed\" = yes && "
@@ -779,11 +868,12 @@ fi
           "test \"$engine_present\" = yes && "
           "test \"$slot_metadata\" = yes; then "
           "if test \"$service_active\" = yes; then "
-          "%1 --config %2 --validate-only >/dev/null 2>&1 && "
+          "%1 --config %2 --validate-only%3 && "
           "service_validation=yes; else "
-          "%1 --config %2 --validate-only --check-engine >/dev/null 2>&1 && "
+          "%1 --config %2 --validate-only --check-engine%3 && "
           "service_validation=yes; fi; fi; ")
-          .arg(posixShellQuote(runtime), posixShellQuote(serviceConfig));
+          .arg(posixShellQuote(runtime), posixShellQuote(serviceConfig),
+               showValidationOutput ? "" : " >/dev/null 2>&1");
   command +=
       QStringLiteral(
           "if test -x ./prepare_model.sh && test -x run/deploy_model.sh; then "

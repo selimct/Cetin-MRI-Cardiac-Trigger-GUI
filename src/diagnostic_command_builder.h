@@ -5,6 +5,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QDateTime>
 #include <QList>
 #include <QString>
 #include <QStringList>
@@ -32,6 +33,10 @@ struct PreparedBundle {
   QString variant;
   bool forceRecoveryOff{false};
   QString reportRevision;
+  QDateTime preparedAt;
+  QString precision;
+  double frameHz{0};
+  QString displayName() const;
 };
 
 [[nodiscard]] QString preparedBundlesCommand();
@@ -75,7 +80,7 @@ validateRuntimeCommand(const DiagnosticRuntimeOptions &options);
 startDirectRuntimeCommand(const DiagnosticRuntimeOptions &options);
 [[nodiscard]] QString stopDirectRuntimeCommand();
 [[nodiscard]] QString
-availabilityProbeCommand(const DiagnosticRuntimeOptions &options);
+availabilityProbeCommand(const DiagnosticRuntimeOptions &options, bool showValidationOutput = false);
 [[nodiscard]] QString rebuildRuntimeCommand();
 
 [[nodiscard]] QString deploymentStopCommand(bool sudoPasswordProvided);

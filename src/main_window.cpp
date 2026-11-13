@@ -16,6 +16,7 @@
 #include <QUuid>
 
 #include <QCheckBox>
+#include <QAbstractSpinBox>
 #include <QCloseEvent>
 #include <QColor>
 #include <QComboBox>
@@ -24,6 +25,7 @@
 #include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QEvent>
 #include <QFontDatabase>
 #include <QFormLayout>
 #include <QGroupBox>
@@ -35,6 +37,7 @@
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QSpinBox>
+#include <QSplitter>
 #include <QTabWidget>
 #include <QTextCharFormat>
 #include <QTextCursor>
@@ -67,6 +70,20 @@ QPushButton *makeActionButton(const QString &text, QWidget *parent) {
   return button;
 }
 
+QLabel *guidance(const QString &text, QWidget *parent) {
+  auto *label = new QLabel(text, parent);
+  label->setWordWrap(true);
+  label->setTextFormat(Qt::PlainText);
+  return label;
+}
+
+void explainAction(QPushButton *button, const QString &purpose, const QString &requirement = {}) {
+  const auto text = purpose + (!button->isEnabled() && !requirement.isEmpty()
+      ? "\nTo use this: " + requirement : QString());
+  button->setToolTip(text);
+  button->setStatusTip(text);
+}
+
 QString completionSummary(int exitCode, QProcess::ExitStatus exitStatus,
                           bool cancelled, qint64 elapsed) {
   if (cancelled) {
@@ -80,16 +97,6 @@ QString completionSummary(int exitCode, QProcess::ExitStatus exitStatus,
       .arg(elapsed);
 }
 
-QColor completionColor(int exitCode, QProcess::ExitStatus exitStatus,
-                       bool cancelled) {
-  if (cancelled) {
-    return QColor(QStringLiteral("#c28b27"));
-  }
-  if (exitStatus == QProcess::NormalExit && exitCode == 0) {
-    return informationalColor();
-  }
-  return elevatedColor();
-}
 } // namespace
 
 MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
@@ -178,13 +185,13 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   connectionOuterLayout->addLayout(connectionLayout);
   connectionOuterLayout->addWidget(acceptNewHostKeyCheck_);
 
-  probeButton_ = new QPushButton(QStringLiteral("Check availability"), central);
+  probeButton_ = new QPushButton(QStringLiteral("Check Jetson"), central);
   probeButton_->setToolTip(QStringLiteral(
-      "Check SSH, models, service readiness and the direct runtime configuration."));
+      "Connect over SSH and refresh models, saved engines and detector readiness. Reads status without changing settings or starting the detector."));
   connectionCheckButton_ =
-      makeActionButton(QStringLiteral("Check"), connectionDialog);
+      makeActionButton(QStringLiteral("Check Jetson"), connectionDialog);
   connectionCheckButton_->setToolTip(QStringLiteral(
-      "Run the availability check with the entered connection settings."));
+      "Use these SSH settings to refresh the Jetson's models and detector state. This does not start or install anything."));
   healthButton_ =
       makeActionButton(QStringLiteral("System information"), connectionDialog);
   auto *connectionActions = new QHBoxLayout;
@@ -201,6 +208,10 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
 
   auto *servicePage = new QWidget(operationsTabs_);
   auto *serviceLayout = new QVBoxLayout(servicePage);
+  serviceLayout->addWidget(guidance("Choose a model, install a saved engine or build a new one, then start the detector. Stop the detector before switching models.", servicePage));
+  nextStepLabel_ = guidance("Open Connection, enter your Jetson settings, then click Check Jetson.", servicePage);
+  nextStepLabel_->setObjectName("nextStep");
+  serviceLayout->addWidget(nextStepLabel_);
   serviceAvailabilityLabel_ = new QLabel(
       QStringLiteral(
           "Availability has not been checked. Service actions are disabled."),
@@ -214,33 +225,33 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   serviceSafetyCheck_->setObjectName("serviceHardwareReview");
   auto *serviceMaintenanceActions = new QHBoxLayout;
   serviceInstallButton_ =
-      makeActionButton(QStringLiteral("Install / repair unit link"),
+      makeActionButton(QStringLiteral("Repair service setup"),
                        servicePage);
   serviceInstallButton_->setToolTip(QStringLiteral(
       "Link this checkout's deploy/dkfz-native-uart-live.service into "
       "/etc/systemd/system and reload systemd. The service must be stopped; "
       "this does not enable or start it."));
   serviceReloadButton_ =
-      makeActionButton(QStringLiteral("Reload unit"), servicePage);
+      makeActionButton(QStringLiteral("Reload service definition"), servicePage);
   serviceMaintenanceActions->addWidget(serviceInstallButton_);
   serviceMaintenanceActions->addWidget(serviceReloadButton_);
   auto *serviceActions = new QHBoxLayout;
   serviceStatusButton_ =
-      makeActionButton(QStringLiteral("Status"), servicePage);
-  serviceStartButton_ = makeActionButton(QStringLiteral("Start"), servicePage);
-  serviceStopButton_ = makeActionButton(QStringLiteral("Stop"), servicePage);
+      makeActionButton(QStringLiteral("Show service status"), servicePage);
+  serviceStartButton_ = makeActionButton(QStringLiteral("Start detector"), servicePage);
+  serviceStopButton_ = makeActionButton(QStringLiteral("Stop detector"), servicePage);
   serviceRestartButton_ =
-      makeActionButton(QStringLiteral("Restart"), servicePage);
+      makeActionButton(QStringLiteral("Restart detector"), servicePage);
   serviceLogsButton_ =
-      makeActionButton(QStringLiteral("Follow log"), servicePage);
-  serviceActions->addWidget(serviceStatusButton_);
+      makeActionButton(QStringLiteral("View live logs"), servicePage);
   serviceActions->addWidget(serviceStartButton_);
   serviceActions->addWidget(serviceStopButton_);
   serviceActions->addWidget(serviceRestartButton_);
-  serviceActions->addWidget(serviceLogsButton_);
-  serviceLayout->addWidget(serviceAvailabilityLabel_);
+  auto *serviceReadActions = new QHBoxLayout;
+  serviceReadActions->addWidget(serviceStatusButton_);
+  serviceReadActions->addWidget(serviceLogsButton_);
 
-  auto *modelDeploymentGroup = new QGroupBox(QStringLiteral("Model deployment"), servicePage);
+  auto *modelDeploymentGroup = new QGroupBox(QStringLiteral("1. Choose and install a model"), servicePage);
   auto *finishedModelForm = new QFormLayout(modelDeploymentGroup);
   finishedModelForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
   finishedModelCombo_ = new QComboBox(modelDeploymentGroup);
@@ -257,14 +268,14 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   modelSelectionRow->addWidget(finishedModelCombo_, 1);
   modelSelectionRow->addWidget(refreshModelsButton_);
   reexportModelButton_ = makeActionButton(
-      QStringLiteral("Prepare isolated bundle"), modelDeploymentGroup);
+      QStringLiteral("Build files only"), modelDeploymentGroup);
   reexportModelButton_->setObjectName(QStringLiteral("reexportModel"));
   reexportModelButton_->setToolTip(QStringLiteral(
       "Copy saved weights into a new bundle, export ONNX, build TensorRT and validate recordings. "
       "Preparation does not activate files or verify accuracy or sustained timing. "
       "Requires the full Jetson Python environment and a built runtime. Stop "
       "the service and direct inference first."));
-  finishedModelForm->addRow(QStringLiteral("Finished models"), modelSelectionRow);
+  finishedModelForm->addRow(QStringLiteral("Model"), modelSelectionRow);
   pythonExecutableEdit_ = new QLineEdit("/home/orin/envs/jet/bin/python", modelDeploymentGroup);
   pythonExecutableEdit_->setObjectName("jetsonPython");
   validationInputsEdit_ = new QPlainTextEdit(modelDeploymentGroup);
@@ -281,22 +292,21 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
     label->setWordWrap(true);
     label->setTextFormat(Qt::PlainText);
   }
-  activateModelButton_ = makeActionButton(QStringLiteral("Activate prepared bundle"), modelDeploymentGroup);
+  activateModelButton_ = makeActionButton(QStringLiteral("Install files built this session"), modelDeploymentGroup);
   activateModelButton_->setObjectName("activatePreparedBundle");
   activateModelButton_->setToolTip("Activate the prepared pair using its fingerprinted validation report. The service must already be idle. Starting the service is a separate action.");
-  installModelButton_ = makeActionButton("Install selected model", modelDeploymentGroup);
+  installModelButton_ = makeActionButton("Build and install new engine", modelDeploymentGroup);
   installModelButton_->setObjectName("installSelectedModel");
   installModelButton_->setToolTip("Convert saved PTH weights, validate the engine, activate the checked model and verify service readiness. The service must already be stopped and will stay stopped.");
   installationStateLabel_ = new QLabel("Select a saved model to install. The service stays stopped until Start.", modelDeploymentGroup);
   installationStateLabel_->setObjectName("installationState");
   installationStateLabel_->setWordWrap(true);
   installationStateLabel_->setTextFormat(Qt::PlainText);
-  finishedModelForm->addRow(ecg3SourceCheck_);
-  finishedModelForm->addRow(installModelButton_);
+  finishedModelForm->addRow(guidance("Previously installed this model? Choose a saved engine below to reuse its conversion.", modelDeploymentGroup));
   savedBundleCombo_ = new QComboBox(modelDeploymentGroup);
   savedBundleCombo_->setObjectName("savedBundleSelection");
   savedBundleCombo_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
-  savedBundleCombo_->setMinimumContentsLength(22);
+  savedBundleCombo_->setMinimumContentsLength(36);
   savedBundleCombo_->addItem("Refresh to find saved engines");
   savedBundleCombo_->setToolTip("Previous installations are kept under build_native/prepared_models/ on the Jetson. Entries match the selected model, variant and startup recovery policy; source bytes and validation are checked when reused.");
   refreshBundlesButton_ = new QPushButton("Refresh saved engines", modelDeploymentGroup);
@@ -305,14 +315,28 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   savedBundleRow->addWidget(savedBundleCombo_, 1);
   savedBundleRow->addWidget(refreshBundlesButton_);
   finishedModelForm->addRow("Saved engines", savedBundleRow);
-  reuseBundleButton_ = new QPushButton("Reuse saved engine", modelDeploymentGroup);
+  reuseBundleButton_ = new QPushButton("Use saved engine", modelDeploymentGroup);
   reuseBundleButton_->setObjectName("reuseSavedBundle");
   reuseBundleButton_->setToolTip("Verify and activate this saved engine without ONNX export or TensorRT generation. The detector must be stopped. Start remains separate. To rebuild instead, use Install selected model.");
   finishedModelForm->addRow(reuseBundleButton_);
+  auto *showBuildButton = new QPushButton("Show new-engine build", modelDeploymentGroup);
+  showBuildButton->setCheckable(true);
+  showBuildButton->setToolTip("Expand the first-installation/rebuild controls. Opening this section does not send a command. Use a saved engine above to skip conversion.");
+  auto *newBuildSettings = new QWidget(modelDeploymentGroup);
+  auto *newBuildLayout = new QVBoxLayout(newBuildSettings);
+  newBuildLayout->setContentsMargins(0, 0, 0, 0);
+  newBuildLayout->addWidget(guidance("First installation or rebuilding? Confirm the training input, then build a new engine. This can take several minutes.", newBuildSettings));
+  newBuildLayout->addWidget(ecg3SourceCheck_);
+  newBuildLayout->addWidget(installModelButton_);
+  newBuildSettings->hide();
+  connect(showBuildButton, &QPushButton::toggled, newBuildSettings, &QWidget::setVisible);
+  connect(showBuildButton, &QPushButton::toggled, showBuildButton, [showBuildButton](bool open) {
+    showBuildButton->setText(open ? "Hide new-engine build" : "Show new-engine build");
+  });
+  finishedModelForm->addRow(showBuildButton);
+  finishedModelForm->addRow(newBuildSettings);
   finishedModelForm->addRow(installationStateLabel_);
-  finishedModelForm->addRow(preparationStateLabel_);
-  finishedModelForm->addRow(activationStateLabel_);
-  auto *advancedButton = new QPushButton("Advanced model installation", modelDeploymentGroup);
+  auto *advancedButton = new QPushButton("Build options and manual steps", modelDeploymentGroup);
   advancedButton->setObjectName("showAdvancedModelInstallation");
   advancedButton->setCheckable(true);
   auto *advancedSettings = new QWidget(modelDeploymentGroup);
@@ -323,33 +347,58 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   auto *recordingHelp = new QLabel("Recorded ECG is replayed to check conversion parity. Empty uses existing data/live/p12 and p13 out recordings. These checks do not measure accuracy or sustained real-time performance.", advancedSettings);
   recordingHelp->setWordWrap(true);
   advancedForm->addRow(recordingHelp);
+  advancedForm->addRow(guidance("Optional split workflow: build files first, then install them. Use the main build button for both steps together.", advancedSettings));
   advancedForm->addRow(reexportModelButton_);
   advancedForm->addRow(activateModelButton_);
+  advancedForm->addRow(preparationStateLabel_);
+  advancedForm->addRow(activationStateLabel_);
   advancedSettings->hide();
   connect(advancedButton, &QPushButton::toggled, advancedSettings, &QWidget::setVisible);
   finishedModelForm->addRow(advancedButton);
   finishedModelForm->addRow(advancedSettings);
   serviceLayout->addWidget(modelDeploymentGroup);
-  serviceLayout->addWidget(serviceSafetyCheck_);
-  serviceLayout->addLayout(serviceMaintenanceActions);
-  serviceLayout->addLayout(serviceActions);
-  workerSchedulingLabel_ = new QLabel("Worker scheduling: unobserved. Follow log to read actual worker status.", servicePage);
+  auto *runGroup = new QGroupBox("2. Run the installed model", servicePage);
+  auto *runLayout = new QVBoxLayout(runGroup);
+  installedModelLabel_ = guidance("Installed model: click Check Jetson to read it.", runGroup);
+  installedModelLabel_->setObjectName("installedModelSummary");
+  runLayout->addWidget(installedModelLabel_);
+  runLayout->addWidget(guidance("Start runs the installed model. Choosing a different entry above takes effect only after you install or use its engine.", runGroup));
+  runLayout->addWidget(serviceSafetyCheck_);
+  runLayout->addLayout(serviceActions);
+  runLayout->addLayout(serviceReadActions);
+  serviceLayout->addWidget(runGroup);
+  auto *runtimeDetailsButton = new QPushButton("Show readiness and timing details", servicePage);
+  runtimeDetailsButton->setCheckable(true);
+  auto *runtimeDetails = new QWidget(servicePage);
+  auto *runtimeDetailsLayout = new QVBoxLayout(runtimeDetails);
+  runtimeDetailsLayout->setContentsMargins(0, 0, 0, 0);
+  runtimeDetailsLayout->addWidget(serviceAvailabilityLabel_);
+  workerSchedulingLabel_ = new QLabel("Worker scheduling: unobserved. View live logs to read actual worker status.", servicePage);
   workerSchedulingLabel_->setObjectName("workerSchedulingStatus");
   workerSchedulingLabel_->setTextFormat(Qt::PlainText);
   workerSchedulingLabel_->setWordWrap(true);
-  serviceLayout->addWidget(workerSchedulingLabel_);
-  runtimeTimingLabel_ = new QLabel("Runtime timing: unobserved. Follow log for deadline and frame delay measurements.", servicePage);
+  runtimeDetailsLayout->addWidget(workerSchedulingLabel_);
+  runtimeTimingLabel_ = new QLabel("Runtime timing: unobserved. View live logs for deadline and frame delay measurements.", servicePage);
   runtimeTimingLabel_->setObjectName("runtimeTimingStatus");
   runtimeTimingLabel_->setTextFormat(Qt::PlainText);
   runtimeTimingLabel_->setWordWrap(true);
-  serviceLayout->addWidget(runtimeTimingLabel_);
+  runtimeDetailsLayout->addWidget(runtimeTimingLabel_);
+  runtimeDetails->hide();
+  connect(runtimeDetailsButton, &QPushButton::toggled, runtimeDetails, &QWidget::setVisible);
+  connect(runtimeDetailsButton, &QPushButton::toggled, runtimeDetailsButton, [runtimeDetailsButton](bool open) {
+    runtimeDetailsButton->setText(open ? "Hide readiness and timing details" : "Show readiness and timing details");
+  });
+  serviceLayout->addWidget(runtimeDetailsButton);
+  serviceLayout->addWidget(runtimeDetails);
   serviceLayout->addStretch();
   auto *serviceScroll = new QScrollArea(operationsTabs_);
   serviceScroll->setWidgetResizable(true);
   serviceScroll->setWidget(servicePage);
-  operationsTabs_->addTab(serviceScroll, QStringLiteral("Installed service"));
+  operationsTabs_->addTab(serviceScroll, QStringLiteral("Run"));
+  operationsTabs_->setTabToolTip(0, "Choose or switch a model, then start or stop the installed detector. Begin here for normal use.");
   auto *detectorPage = new QWidget(operationsTabs_);
   auto *detectorLayout = new QVBoxLayout(detectorPage);
+  detectorLayout->addWidget(guidance("Adjust the running detector here. Primary settings persist across restarts; live recovery changes last for the current run. Refresh after applying to confirm what is active.", detectorPage));
   auto *thresholdPanel = new ThresholdPanel(&thresholds_, detectorPage);
   recoveryPanel_ = new RecoveryPanel(&recovery_, detectorPage);
   finishedModelForm->insertRow(1, recoveryPanel_->takeDeploymentControls());
@@ -358,17 +407,24 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   auto *detectorScroll = new QScrollArea(operationsTabs_);
   detectorScroll->setWidgetResizable(true);
   detectorScroll->setWidget(detectorPage);
-  operationsTabs_->addTab(detectorScroll, QStringLiteral("Detector controls"));
+  operationsTabs_->addTab(detectorScroll, QStringLiteral("Detector settings"));
+  operationsTabs_->setTabToolTip(1, "Change primary thresholds and live recovery. Each section explains when changes persist and how to confirm them.");
 
   auto *diagnosticPage = new QWidget(operationsTabs_);
   auto *diagnosticLayout = new QVBoxLayout(diagnosticPage);
+  diagnosticLayout->addWidget(guidance("Use these tools for troubleshooting or a temporary test run over SSH. For everyday operation, start the detector from Run.", diagnosticPage));
+  auto *maintenanceGroup = new QGroupBox("Service setup", diagnosticPage);
+  auto *maintenanceLayout = new QVBoxLayout(maintenanceGroup);
+  maintenanceLayout->addWidget(guidance("Use these only when Check Jetson reports a service setup problem, or after editing the service definition.", maintenanceGroup));
+  maintenanceLayout->addLayout(serviceMaintenanceActions);
+  diagnosticLayout->addWidget(maintenanceGroup);
   diagnosticAvailabilityLabel_ = new QLabel(
       QStringLiteral(
           "Availability has not been checked. Direct actions are disabled."),
       diagnosticPage);
   diagnosticAvailabilityLabel_->setWordWrap(true);
   diagnosticCheckButton_ =
-      new QPushButton(QStringLiteral("Check"), diagnosticPage);
+      new QPushButton(QStringLiteral("Check test setup"), diagnosticPage);
   diagnosticCheckButton_->setToolTip(QStringLiteral(
       "Run the availability check with the entered model and runtime "
       "settings."));
@@ -391,6 +447,7 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   variantCombo_ = new QComboBox(diagnosticPage);
   variantCombo_->setObjectName(QStringLiteral("modelVariant"));
   variantCombo_->addItems({QStringLiteral("best"), QStringLiteral("tuned")});
+  variantCombo_->setToolTip("best selects the saved base checkpoint; tuned selects the saved fine-tuned checkpoint. Normally filled by the Model selector in Run.");
   preparationModeCombo_ = new QComboBox(diagnosticPage);
   preparationModeCombo_->addItem(
       QStringLiteral("Isolated Jetson: PTH → ONNX → TensorRT"),
@@ -404,6 +461,10 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   outputModeCombo_->setToolTip(
       QStringLiteral("Use none for the safest live diagnostic. GPIO modes can "
                      "create physical pulses."));
+  outputModeCombo_->setItemData(0, "Inference only, with no trigger pulses or event records.", Qt::ToolTipRole);
+  outputModeCombo_->setItemData(1, "Print trigger events as JSON records in the console, without GPIO pulses.", Qt::ToolTipRole);
+  outputModeCombo_->setItemData(2, "Send physical trigger pulses through the configured GPIO output.", Qt::ToolTipRole);
+  outputModeCombo_->setItemData(3, "Send physical GPIO pulses and print trigger events in the console.", Qt::ToolTipRole);
   configPathEdit_ = new QLineEdit(
       QStringLiteral("config/native_uart_live.conf"), diagnosticPage);
   sessionLogPathEdit_ = new QLineEdit(diagnosticPage);
@@ -440,8 +501,7 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   deploymentForm->addRow(QStringLiteral("Model source directory"),
                          modelDirectoryEdit_);
   deploymentForm->addRow(QStringLiteral("Variant"), variantCombo_);
-  deploymentForm->addRow(QStringLiteral("Jetson preparation"),
-                         preparationModeCombo_);
+  preparationModeCombo_->hide(); // Preparation always uses the same isolated pipeline.
 
   runtimeForm->addRow(QStringLiteral("Trigger output"), outputModeCombo_);
   runtimeForm->addRow(QStringLiteral("Runtime config"), configPathEdit_);
@@ -460,18 +520,18 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   auto *diagnosticActions = new QHBoxLayout;
   prepareModelButton_ = makeActionButton(
       QStringLiteral("Prepare isolated bundle"), diagnosticPage);
+  prepareModelButton_->hide(); // The Run tab already exposes the manual build step.
   prepareModelButton_->setToolTip(QStringLiteral(
       "Runs prepare_model.sh --prepare-only with recordings and a new output directory. The systemd service must be "
       "stopped."));
   validateRuntimeButton_ = makeActionButton(
-      QStringLiteral("Validate config + engine"), diagnosticPage);
+      QStringLiteral("Validate test setup"), diagnosticPage);
   startInferenceButton_ = makeActionButton(
-      QStringLiteral("Start direct inference"), diagnosticPage);
+      QStringLiteral("Start test run"), diagnosticPage);
   stopInferenceButton_ =
-      makeActionButton(QStringLiteral("Stop direct inference"), diagnosticPage);
+      makeActionButton(QStringLiteral("Stop test run"), diagnosticPage);
   rebuildRuntimeButton_ = makeActionButton(
-      QStringLiteral("Build / rebuild runtime"), diagnosticPage);
-  diagnosticActions->addWidget(prepareModelButton_);
+      QStringLiteral("Rebuild detector software"), diagnosticPage);
   diagnosticActions->addWidget(validateRuntimeButton_);
   diagnosticActions->addWidget(startInferenceButton_);
   diagnosticActions->addWidget(stopInferenceButton_);
@@ -484,18 +544,21 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   diagnosticLayout->addLayout(diagnosticColumns);
   diagnosticLayout->addLayout(diagnosticChecks);
   diagnosticLayout->addLayout(diagnosticActions);
-  operationsTabs_->addTab(diagnosticPage,
-                          QStringLiteral("Model deployment / direct"));
+  auto *diagnosticScroll = new QScrollArea(operationsTabs_);
+  diagnosticScroll->setWidgetResizable(true);
+  diagnosticScroll->setWidget(diagnosticPage);
+  operationsTabs_->addTab(diagnosticScroll, QStringLiteral("Advanced"));
+  operationsTabs_->setTabToolTip(2, "Inspect test configuration, run temporary diagnostics, or repair the Jetson service setup.");
 
   auto *commandGroup =
-      new QGroupBox(QStringLiteral("Custom non-interactive command"), central);
+      new QGroupBox(QStringLiteral("Remote command (advanced)"), central);
   auto *commandLayout = new QHBoxLayout(commandGroup);
   commandCombo_ = new QComboBox(commandGroup);
   commandCombo_->setEditable(true);
   commandCombo_->setInsertPolicy(QComboBox::NoInsert);
   commandCombo_->lineEdit()->setPlaceholderText(
       QStringLiteral("Enter a command"));
-  runButton_ = new QPushButton(QStringLiteral("Run"), commandGroup);
+  runButton_ = new QPushButton(QStringLiteral("Run command"), commandGroup);
   cancelButton_ = new QPushButton(QStringLiteral("Cancel"), commandGroup);
   cancelButton_->setEnabled(false);
   auto *clearButton =
@@ -504,8 +567,20 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   commandLayout->addWidget(runButton_);
   commandLayout->addWidget(cancelButton_);
   commandLayout->addWidget(clearButton);
+  runButton_->setToolTip("Execute the typed shell command on the Jetson over SSH. Commands may change files or settings; interactive password prompts are unsupported.");
+  clearButton->setToolTip("Clear the visible console text. Remote logs and the detector keep running.");
+  healthButton_->setToolTip("Read the Jetson's operating system, storage and CUDA/TensorRT tool information into the console.");
+  refreshModelsButton_->setToolTip("Read available trained models and saved engines from the Jetson. Selection alone does not install a model.");
+  refreshBundlesButton_->setToolTip("Find previous successful installations that match this model, variant and startup recovery policy. Reads files without installing anything.");
+  serviceSafetyCheck_->setToolTip("Required before Start or Restart because the installed service can drive the configured hardware output.");
+  ecg3SourceCheck_->setToolTip("Required for a new build: confirm the training ECG3 input is ECG2 minus ECG1. Saved-engine reuse uses its existing validation evidence.");
+  pythonExecutableEdit_->setToolTip("Python on the Jetson with the backend's export and parity dependencies. Used during builds and saved-engine activation.");
+  validationInputsEdit_->setToolTip("Raw ECG parquet files on the Jetson, one project-relative path per line. Empty uses existing standard p12/p13 recordings. Used to validate a new conversion.");
+  configPathEdit_->setToolTip("Project-relative runtime configuration for test runs. The installed service uses its own fixed configuration.");
+  emitProbabilitiesCheck_->setToolTip("Print per-frame probabilities during a test run. Requires a JSONL output mode and can produce a large stream of records.");
 
   console_ = new QPlainTextEdit(central);
+  console_->setObjectName("remoteOutput");
   console_->setReadOnly(true);
   console_->setLineWrapMode(QPlainTextEdit::NoWrap);
   console_->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
@@ -529,9 +604,53 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
   topActions->addWidget(probeButton_);
   topActions->addWidget(connectionButton);
   mainLayout->addLayout(topActions);
-  mainLayout->addWidget(operationsTabs_);
-  mainLayout->addWidget(commandGroup);
-  mainLayout->addWidget(console_, 1);
+  auto *splitter = new QSplitter(Qt::Vertical, central);
+  splitter->setObjectName("outputSplitter");
+  splitter->setHandleWidth(9);
+  splitter->addWidget(operationsTabs_);
+  auto *outputPanel = new QWidget(splitter);
+  auto *outputLayout = new QVBoxLayout(outputPanel);
+  outputLayout->setContentsMargins(0, 0, 0, 0);
+  auto *commandToggle = new QPushButton("Show remote command", central);
+  commandToggle->setCheckable(true);
+  commandToggle->setToolTip("Show the optional SSH command field for advanced troubleshooting.");
+  commandGroup->hide();
+  connect(commandToggle, &QPushButton::toggled, commandGroup, &QWidget::setVisible);
+  connect(commandToggle, &QPushButton::toggled, commandToggle, [commandToggle](bool open) {
+    commandToggle->setText(open ? "Hide remote command" : "Show remote command");
+  });
+  auto *outputActions = new QHBoxLayout;
+  outputActions->addWidget(commandToggle);
+  outputActions->addStretch();
+  auto *expandOutput = new QPushButton("Expand output", outputPanel);
+  expandOutput->setObjectName("expandOutput");
+  expandOutput->setToolTip("Give the output pane the full working area. Click again to restore the controls. You can also drag the divider above this pane.");
+  outputActions->addWidget(expandOutput);
+  outputActions->addWidget(clearButton);
+  outputActions->addWidget(cancelButton_);
+  outputLayout->addLayout(outputActions);
+  outputLayout->addWidget(commandGroup);
+  outputLayout->addWidget(console_, 1);
+  splitter->addWidget(outputPanel);
+  splitter->setStretchFactor(0, 4);
+  splitter->setStretchFactor(1, 1);
+  splitter->setSizes({590, 150});
+  splitter->handle(1)->setToolTip("Drag up or down to resize the output pane.");
+  connect(expandOutput, &QPushButton::clicked, splitter,
+          [splitter, expandOutput, previousSizes = QList<int>{590, 150}]() mutable {
+    if (splitter->sizes().front() == 0) {
+      splitter->setSizes(previousSizes);
+      expandOutput->setText("Expand output");
+    } else {
+      previousSizes = splitter->sizes();
+      splitter->setSizes({0, splitter->height()});
+      expandOutput->setText("Restore controls");
+    }
+  });
+  connect(splitter, &QSplitter::splitterMoved, expandOutput, [splitter, expandOutput] {
+    expandOutput->setText(splitter->sizes().front() == 0 ? "Restore controls" : "Expand output");
+  });
+  mainLayout->addWidget(splitter, 1);
   mainLayout->addWidget(statusLabel_);
   setCentralWidget(central);
 
@@ -857,28 +976,12 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
           [this] { updateDiagnosticModeControls(); });
 
   connect(&runner_, &RemoteCommandRunner::started, this,
-          [this](const QString &destination, const QString &command) {
+          [this](const QString &, const QString &) {
             commandTimer_.restart();
             activeStandardOutput_.clear();
             activeStandardError_.clear();
             mainStandardOutputDisplayBuffer_.clear();
             mainStandardErrorDisplayBuffer_.clear();
-            QString displayCommand = command;
-            if (activeTask_ == TaskKind::availabilityProbe) {
-              displayCommand = QStringLiteral("[availability preflight]");
-            } else if (activeTask_ == TaskKind::listModels || activeTask_ == TaskKind::listBundles) {
-              displayCommand = QStringLiteral("[list models/saved engines]");
-            } else if (activeTask_ == TaskKind::serviceUnitRepair) {
-              displayCommand =
-                  QStringLiteral("[install/repair service unit link]");
-            } else if (activeTask_ == TaskKind::directInference) {
-              displayCommand = QStringLiteral("[managed direct inference]");
-            }
-            appendConsole(
-                QStringLiteral("\n[%1] %2 $ %3\n")
-                    .arg(QDateTime::currentDateTime().toString(Qt::ISODate),
-                         destination, displayCommand),
-                QColor(QStringLiteral("#4f8dd6")));
             if (activeTask_ == TaskKind::directInference) {
               capabilities_.directInferenceActive = true;
             }
@@ -888,10 +991,9 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
           [this](const QByteArray &data) {
             // Only finite structured responses need complete capture. Live
             // streams and arbitrary console commands retain a bounded tail.
-            if (activeTask_ == TaskKind::availabilityProbe || activeTask_ == TaskKind::listModels || activeTask_ == TaskKind::listBundles ||
-                activeTask_ == TaskKind::installModel) {
+            if (activeTask_ == TaskKind::availabilityProbe || activeTask_ == TaskKind::listModels || activeTask_ == TaskKind::listBundles) {
               activeStandardOutput_.append(data);
-            } else {
+            } else if (activeTask_ != TaskKind::installModel) {
               appendOutputTail(activeStandardOutput_, data);
             }
             if (activeTask_ != TaskKind::availabilityProbe && activeTask_ != TaskKind::listModels && activeTask_ != TaskKind::listBundles) {
@@ -908,8 +1010,6 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
           [this](const QString &message) {
             const bool availabilityCheck =
                 activeTask_ == TaskKind::availabilityProbe;
-            appendConsole(QStringLiteral("Error: %1\n").arg(message),
-                          QColor(QStringLiteral("#d45b5b")));
             statusLabel_->setText(message);
             if (availabilityCheck) {
               invalidateAvailability();
@@ -939,16 +1039,10 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
           &MainWindow::finishMainCommand);
 
   connect(&controlRunner_, &RemoteCommandRunner::started, this,
-          [this](const QString &destination, const QString &) {
+          [this](const QString &, const QString &) {
             controlTimer_.restart();
             controlStandardOutputDisplayBuffer_.clear();
             controlStandardErrorDisplayBuffer_.clear();
-            appendConsole(
-                QStringLiteral("\n[%1] %2 $ %3\n")
-                    .arg(QDateTime::currentDateTime().toString(Qt::ISODate),
-                         destination,
-                         QStringLiteral("[managed direct-inference stop]")),
-                QColor(QStringLiteral("#4f8dd6")));
             updateActionAvailability();
           });
   connect(&controlRunner_, &RemoteCommandRunner::standardOutputReceived, this,
@@ -963,8 +1057,6 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
           });
   connect(&controlRunner_, &RemoteCommandRunner::failedToStart, this,
           [this](const QString &message) {
-            appendConsole(QStringLiteral("Error: %1\n").arg(message),
-                          QColor(QStringLiteral("#d45b5b")));
             statusLabel_->setText(message);
             updateActionAvailability();
           });
@@ -977,8 +1069,6 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
             controlTimer_.isValid() ? controlTimer_.elapsed() : 0;
         const QString summary =
             completionSummary(exitCode, exitStatus, cancelled, elapsed);
-        appendConsole(QStringLiteral("\n[%1]\n").arg(summary),
-                      completionColor(exitCode, exitStatus, cancelled));
         if (exitStatus == QProcess::NormalExit && exitCode == 0) {
           capabilities_.directInferenceActive = false;
         }
@@ -1019,7 +1109,26 @@ MainWindow::MainWindow(const SshConnectionOptions &initialConnection,
       connect(refreshShortcut, &QShortcut::activated, this, &MainWindow::checkAvailability);
     }
   }
+  // Wheel gestures should scroll the surrounding page, never change a setting,
+  // even when its control has keyboard focus. Popup lists still scroll normally.
+  for (auto *combo : findChildren<QComboBox *>()) {
+    combo->setFocusPolicy(Qt::StrongFocus);
+    combo->installEventFilter(this);
+  }
+  for (auto *spin : findChildren<QAbstractSpinBox *>()) {
+    spin->setFocusPolicy(Qt::StrongFocus);
+    spin->installEventFilter(this);
+  }
   updateDiagnosticModeControls();
+}
+
+bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
+  if (event->type() == QEvent::Wheel &&
+      (qobject_cast<QComboBox *>(watched) || qobject_cast<QAbstractSpinBox *>(watched))) {
+    event->ignore();
+    return true;
+  }
+  return QMainWindow::eventFilter(watched, event);
 }
 
 void MainWindow::closeEvent(QCloseEvent *event) {
@@ -1171,6 +1280,18 @@ void MainWindow::appendClassifiedConsoleBytes(QByteArray &pending,
   pending.append(data);
   while (true) {
     const qsizetype newline = pending.indexOf('\n');
+    // Keep private protocol records intact even when a large catalog arrives
+    // across several SSH chunks. Capture only those records for readiness;
+    // ordinary installation output is displayed without retaining a second copy.
+    if (activeTask_ == TaskKind::installModel &&
+        &pending == &mainStandardOutputDisplayBuffer_ && pending.startsWith("__JCG_")) {
+      if (newline < 0) break;
+      const auto record = pending.left(newline + 1);
+      pending.remove(0, newline + 1);
+      activeStandardOutput_.append(record);
+      applyRuntimeInputEvent(record);
+      continue;
+    }
     if (newline < 0 && pending.size() < kMaximumOutputTailBytes) {
       break;
     }
@@ -1183,7 +1304,6 @@ void MainWindow::appendClassifiedConsoleBytes(QByteArray &pending,
     pending.remove(0, length);
     if (!line.endsWith('\n')) line.append('\n');
     applyRuntimeInputEvent(line);
-    if (activeTask_ == TaskKind::installModel && line.startsWith("__JCG_")) continue;
     const ConsoleLineSeverity severity = classifyConsoleLine(line);
     const QByteArray displayLine = activeTask_ == TaskKind::serviceLogs
                                        ? serviceLogDisplayLine(line)
@@ -1313,7 +1433,6 @@ void MainWindow::checkAvailability() {
   const DiagnosticRuntimeOptions options = diagnosticOptions();
   const QString error = validateDiagnosticOptions(options);
   if (!error.isEmpty()) {
-    appendConsole(QStringLiteral("Error: %1\n").arg(error), elevatedColor());
     statusLabel_->setText(error);
     return;
   }
@@ -1509,9 +1628,6 @@ void MainWindow::applyAvailabilityProbe(const QByteArray &output) {
   }
   diagnosticAvailabilityLabel_->setText(message);
 
-  appendConsole(QStringLiteral("SSH connection successful.\n%1\n")
-                    .arg(serviceAvailabilityLabel_->text()),
-                QColor(QStringLiteral("#4d9b58")));
 }
 
 void MainWindow::applyFinishedModels(const QByteArray &output) {
@@ -1568,12 +1684,20 @@ void MainWindow::syncPreparedBundles() {
   const auto options = diagnosticOptions();
   const QSignalBlocker blocker(savedBundleCombo_);
   savedBundleCombo_->clear();
+  QMap<QString, int> labelCounts;
+  for (const auto &bundle : preparedBundles_)
+    if (bundle.modelName == options.modelName && bundle.variant == options.variant &&
+        bundle.forceRecoveryOff == options.forceRecoveryOff) ++labelCounts[bundle.displayName()];
+  QMap<QString, int> labelNumbers;
   for (const auto &bundle : preparedBundles_) {
     if (bundle.modelName != options.modelName || bundle.variant != options.variant ||
         bundle.forceRecoveryOff != options.forceRecoveryOff) continue;
-    savedBundleCombo_->addItem(QFileInfo(bundle.directory).fileName(), bundle.directory);
+    auto label = bundle.displayName();
+    if (labelCounts.value(label) > 1) label += QString(" (%1)").arg(++labelNumbers[label]);
+    savedBundleCombo_->addItem(label, bundle.directory);
     savedBundleCombo_->setItemData(savedBundleCombo_->count() - 1,
-        "Saved installation: " + bundle.directory + "\nSource config, weights and validation are rechecked on reuse.", Qt::ToolTipRole);
+        label + "\nSaved installation: " + bundle.directory +
+        "\nSource config, weights and validation are rechecked on reuse.", Qt::ToolTipRole);
   }
   if (savedBundleCombo_->count() == 0)
     savedBundleCombo_->addItem("No saved engines match this model and startup policy — refresh");
@@ -1684,8 +1808,65 @@ void MainWindow::updateActionAvailability() {
   runButton_->setEnabled(!anyBusy);
   cancelButton_->setEnabled(mainBusy && !controlBusy);
   cancelButton_->setText(activeTask_ == TaskKind::directInference
-                             ? QStringLiteral("Stop inference")
-                             : QStringLiteral("Cancel"));
+                             ? QStringLiteral("Stop test run")
+                             : activeTask_ == TaskKind::serviceLogs ? QStringLiteral("Close live logs")
+                                                                 : QStringLiteral("Cancel operation"));
+
+  const QString busyReason = activeTask_ == TaskKind::serviceLogs
+      ? "Click Close live logs to finish viewing the stream, then use this action."
+      : "Wait for the current operation to finish, or cancel it.";
+  const QString idleReason = anyBusy ? busyReason : capabilities_.serviceActive
+      ? "Click Stop detector, then Check Jetson to confirm it has stopped."
+      : capabilities_.directInferenceActive ? "Stop the test run in Advanced first." : QString();
+  const QString checkReason = anyBusy ? busyReason : "Click Check Jetson and resolve the reported readiness issue.";
+  const auto *saved = selectedPreparedBundle();
+  installedModelLabel_->setText(capabilities_.activeModel.isEmpty()
+      ? "Installed model: click Check Jetson to read it."
+      : QString("Installed model: %1 (%2). Detector state: %3.")
+          .arg(capabilities_.activeModel, capabilities_.activeVariant,
+               capabilities_.serviceState.isEmpty() ? "unknown" : capabilities_.serviceState));
+  QString next;
+  if (anyBusy) next = activeTask_ == TaskKind::serviceLogs
+      ? "Viewing live logs. Click Close live logs when you want to use other actions."
+      : "An operation is in progress. Its output appears in the console below.";
+  else if (hostEdit_->text().trimmed().isEmpty()) next = "Open Connection, enter your Jetson SSH settings, then click Check Jetson.";
+  else if (capabilities_.directInferenceActive) next = "A temporary test run is active. Stop test run in Advanced before using the installed detector.";
+  else if (capabilities_.serviceActive) next = capabilities_.serviceInputState == "paused"
+      ? "The detector is active and waiting for usable input. Use Detector settings for live adjustments; stop it before switching models."
+      : "The detector is active. Use Detector settings for live adjustments, or Stop detector before switching models.";
+  else if (capabilities_.serviceReady && capabilities_.activeSelectionMatches) next = serviceSafetyCheck_->isChecked()
+      ? "Ready: click Start detector to run the installed model."
+      : "Ready: review the hardware confirmation below, then click Start detector.";
+  else if (!capabilities_.known) next = "Click Check Jetson to read the installed model and detector state. Saved-engine reuse and builds require the detector to be stopped.";
+  else if (saved) next = "A saved engine is available. Click Use saved engine to install it, then Start detector when ready.";
+  else if (!capabilities_.activeModel.isEmpty() && capabilities_.serviceReady) next = "The installed model differs from your selection. Install the selected model's engine to switch; Start detector runs the installed model shown below.";
+  else if (!capabilities_.service && capabilities_.serviceUnit) next = "The Jetson service needs setup. Open Advanced and use Repair service setup, then Check Jetson again.";
+  else next = "Select a model and refresh saved engines. Use one if available, or confirm ECG3 and Build and install new engine. Open readiness details for any setup issues.";
+  nextStepLabel_->setText("Next step: " + next);
+
+  explainAction(serviceStartButton_, "Start the currently installed model as the Jetson's background detector. Uses the installed hardware configuration; model selection alone does not switch it.",
+      anyBusy ? busyReason : capabilities_.directInferenceActive ? idleReason : capabilities_.serviceActive ? "The detector is already active." : !capabilities_.serviceReady ? checkReason : "Review and tick the hardware confirmation first.");
+  explainAction(serviceStopButton_, "Stop the installed background detector and release its hardware resources. The installed engine stays available for the next start.", anyBusy ? busyReason : "Click Check Jetson to confirm that the detector is active.");
+  explainAction(serviceRestartButton_, "Stop and start the installed detector using its saved startup settings. Live recovery overrides expire at restart; deployment revisions are checked before restarting.", anyBusy ? busyReason : !capabilities_.serviceReady ? checkReason : !serviceSafetyCheck_->isChecked() ? "Review and tick the hardware confirmation first." : "The detector must be active; use Start detector if it is stopped.");
+  explainAction(serviceStatusButton_, "Print the installed service's current status in the console. This is a single read and does not change the detector.", checkReason);
+  explainAction(serviceLogsButton_, "Show recent service logs and stream new records into the console. Click Close live logs to release the console for other actions; the detector keeps running.", checkReason);
+  explainAction(installModelButton_, "Create a fresh ONNX/TensorRT engine from the selected trained weights, validate it, install it and check readiness. This can take several minutes. The service stays stopped until Start detector.",
+      !idleReason.isEmpty() ? idleReason : !preparationValid ? validatePreparationOptions(diagnosticOptions()) : "Select a model and click Check Jetson to confirm the build tools and source files.");
+  explainAction(reuseBundleButton_, "Verify and install the selected saved engine, then check readiness. Skips ONNX export and TensorRT generation; existing validation checks still run. The service stays stopped until Start detector.",
+      !idleReason.isEmpty() ? idleReason : !saved ? "Select a model and startup policy, then Refresh saved engines and choose an entry." : pythonExecutableEdit_->text().trimmed().isEmpty() ? "Set the Jetson Python executable under Build options and manual steps." : optionError);
+  explainAction(reexportModelButton_, "Build and validate model files in a new bundle without installing them. Follow with Install files built this session. The main build button performs both steps together.",
+      !idleReason.isEmpty() ? idleReason : !preparationValid ? validatePreparationOptions(diagnosticOptions()) : checkReason);
+  explainAction(activateModelButton_, "Install the bundle built by Build files only in this session. Checks its report and fingerprints. This does not start the detector; click Check Jetson afterward.",
+      !idleReason.isEmpty() ? idleReason : !bundlePrepared_ ? "Complete Build files only first; changing model/build settings clears that selection." : checkReason);
+  explainAction(serviceInstallButton_, "Link this checkout's existing service definition into systemd and reload it. Host account and hardware provisioning must already exist. Does not enable or start the detector.", !idleReason.isEmpty() ? idleReason : checkReason);
+  explainAction(serviceReloadButton_, "Ask systemd to reread service definitions after editing them. This does not restart the detector or reload its model.", checkReason);
+  explainAction(validateRuntimeButton_, "Check the test configuration and deserialize the installed engine without opening UART/GPIO or starting inference.", !idleReason.isEmpty() ? idleReason : checkReason);
+  explainAction(startInferenceButton_, "Run the installed engine temporarily with the test settings above. Output stays attached to SSH; use Stop test run when finished. Requires a matching selected model and successful setup validation.", !idleReason.isEmpty() ? idleReason : !gpioApproved ? "Review and tick the GPIO hardware confirmation for this output mode." : checkReason);
+  explainAction(stopInferenceButton_, "Send a stop request to the GUI-managed temporary test process. Uses its tracked PID; it does not stop the background service.", "A GUI-managed test run must be active.");
+  explainAction(rebuildRuntimeButton_, "Compile the detector's native software on the Jetson. This rebuilds runtime binaries, not model weights or TensorRT engines. Check Jetson again when finished.", !idleReason.isEmpty() ? idleReason : checkReason);
+  explainAction(cancelButton_, activeTask_ == TaskKind::serviceLogs ? "Close this log stream while leaving the detector running."
+      : activeTask_ == TaskKind::directInference ? "Request a clean stop of the temporary test run."
+      : "Cancel the active SSH operation. Remote build children may continue; Check Jetson before retrying.", "Start a command or open live logs first.");
 }
 
 void MainWindow::updateDiagnosticModeControls() {
@@ -1724,12 +1905,9 @@ void MainWindow::finishMainCommand(int exitCode,
              exitStatus == QProcess::NormalExit && exitCode == 0) {
     applyFinishedModels(activeStandardOutput_);
     applyPreparedBundles(activeStandardOutput_);
-    appendConsole(QStringLiteral("Loaded %1 saved model variants from finished_models.\n")
-                      .arg(finishedModels_.size()), informationalColor());
   } else if (completedTask == TaskKind::listBundles && !cancelled &&
              exitStatus == QProcess::NormalExit && exitCode == 0) {
     applyPreparedBundles(activeStandardOutput_);
-    appendConsole(QString("Loaded %1 validated saved installations.\n").arg(preparedBundles_.size()), informationalColor());
   } else if (completedTask == TaskKind::availabilityProbe) {
     invalidateAvailability();
     thresholds_.invalidate();
@@ -1764,15 +1942,12 @@ void MainWindow::finishMainCommand(int exitCode,
 
   const QString summary =
       completionSummary(exitCode, exitStatus, cancelled, elapsed);
-  appendConsole(QStringLiteral("\n[%1]\n").arg(summary),
-                completionColor(exitCode, exitStatus, cancelled));
   const bool unknownHostKey =
       activeStandardError_.toLower().contains("host key is known for");
   if (unknownHostKey) {
     const QString guidance = QStringLiteral(
         "Unknown SSH host key — open Connection, verify the host, enable "
         "trust for the next connection, and retry.");
-    appendConsole(guidance + QLatin1Char('\n'), attentionColor());
     statusLabel_->setText(guidance);
   } else {
     statusLabel_->setText(summary);

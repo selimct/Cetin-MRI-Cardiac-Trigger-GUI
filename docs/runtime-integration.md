@@ -1,177 +1,285 @@
-# Runtime integration and remaining validation
+<!--
+Copyright (c) 2026 Furkan Selim Cetin <contact@furkancetin.dev>
+SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+Developed at the German Cancer Research Center (DKFZ).
+-->
 
-The GUI targets the isolated preparation/report contract in live_stack commit
-`d290c82d1a6c2dac80a1397b3f27e96b49e235e5` (reviewed 2026-11-11).
-The runtime checkout was read only during development.
+# Runtime integration and validation
+
+[README](../README.md) · [User guide and troubleshooting](user-guide.md)
+
+These notes describe the GUI's contract with the existing Jetson `live_stack`
+checkout. The user-facing tabs are **Run**, **Detector settings**, and **Advanced**.
+Backend capabilities and deployment revisions are read from the selected remote
+checkout; a folder name or a successful SSH connection alone does not establish
+runtime compatibility. This GUI does not install backend helper packages.
+
+## Remote interface
+
+| Operation | Existing remote interface |
+| --- | --- |
+| Transport | System OpenSSH client, `BatchMode=yes`, no PTY, remote Bash under the configured checkout. |
+| New preparation | `prepare_model.sh --jetson-only --prepare-only --output-dir ...`. |
+| Report verification | `run/check_prepared_model.py` with report/config/checkpoint/engine, variant and recovery policy. |
+| Activation/reuse | `run/deploy_model.sh --engine ... --validated-report ...`, exact source files and selected variant. |
+| Native validation/test | `build_native/inference/native_uart_live_runtime`. |
+| Installed detector | `dkfz-native-uart-live.service`, backed by `deploy/dkfz-native-uart-live.service`. |
+| Live recovery | `build_native/inference/native_live_recovery_control`, schema `dkfz-live-recovery-control-v1`, API version 1. |
+| Live primary | Checked atomic manifest/fallback writes and native journal readback. |
+| Logs | `journalctl --namespace=dkfz-live`; preparation logs remain in the bundle. |
+
+Model and bundle discovery use remote shell/coreutils and local Qt JSON parsing.
+They do not require a local backend checkout or remote Python. Preparation and
+activation use the selected Jetson Python environment and the backend's existing
+export/parity dependencies. Advanced runtime rebuilds compile on the target;
+no desktop-built runtime binary is transferred.
+
+## Preparation, activation and reuse
+
+**Build and install new engine** performs preparation, activation and a final
+readiness probe under `.jetson-control-deployment.lock`. The detector must already
+be idle and remains stopped. A failed stage prevents subsequent stages. Successful
+combined installation needs no extra Check before a separately requested
+**Start detector**; the hardware confirmation still applies. Failure after
+activation leaves readiness unconfirmed.
+
+New bundles have unique paths:
+
+```text
+build_native/prepared_models/gui-<model>-<UTC-time>-<uuid>/
+  model/train_config.json
+  model/best.pth
+  model/model.engine
+  model/model.conf
+  validation_report.json
+  logs/
+```
+
+Preparation always exports from the saved checkpoint and matching training
+configuration, even if an ONNX file already exists. The GUI passes
+`--max-stream-samples 0`, `--ecg3-source ecg2_minus_ecg1`, and repeated
+`--validation-input` arguments. Empty recording settings select existing
+`data/live/p12/p12_out.parquet` and `data/live/p13/p13_out.parquet`; at least one
+must exist. Overrides are project-relative paths. Both frame rates require the
+new-build ECG confirmation and recordings. The GUI never falls back to the old
+implicit prepare-and-activate workflow.
+
+The optional **Build files only** / **Install files built this session** controls
+split preparation and activation. Editing model/build settings clears that
+manual activation eligibility. A manual activation requires Check before Start.
+
+**Use saved engine** discovers retained bundles independently of desktop session
+state. Discovery requires the report, copied config, checkpoint and engine to be
+readable inside the bundle. Eligibility checks include:
+
+- schema `dkfz-prepared-model-v1`, successful validation and unchanged source;
+- explicit best/tuned variant and recovery-policy metadata;
+- recorded ECG2-minus-ECG1 confirmation and successful nonempty stream validation;
+- SHA256 fingerprints for configuration, checkpoint and engine.
+
+The UI filters candidates by model name, variant and startup recovery policy.
+On reuse it checks idle state, canonical path containment, the report revision
+read during discovery, and byte equality between the selected source files and
+the bundle's copies. The existing backend report validator and activation path
+then recheck fingerprints, parity and engine validity. Reuse skips export and
+engine generation; it does not skip backend validation. A failed check never
+triggers an automatic rebuild or service start. Original recording paths and a
+new ECG checkbox are unnecessary because reuse pins existing report evidence.
+
+Bundles are retained after both success and failure; cleanup is manual. Keep the
+complete bundle for reuse and deployed-source readback. The GUI changes display
+labels only: preparation timestamps are parsed from automatic UTC names and
+shown in desktop local time without timezone text. Precision/rate come from the
+report. Unknown metadata stays unavailable, and tooltips retain the exact path.
+
+For tuned preparation, copied source files are normalized to
+`model/train_config.json` and `model/best.pth`, while activation retains
+`model_variant=tuned`. The GUI adds the relative
+`model/tuning/tuned_config.json -> ../train_config.json` alias expected by the
+backend's tuned recovery-source lookup. It does not alter the copied config or
+its report fingerprint. Alias-creation failure leaves preparation unconfirmed.
+
+## Service guards and readiness
+
+The readiness probe checks the checkout unit, installed fragment resolution,
+`NeedDaemonReload`, the selected checkout bind source, fixed working directory,
+service account/group/state-directory presence, runtime/configuration and stable
+`deploy/model/` files. Capture paths in the service config must remain under
+`/var/lib/dkfz-live`. Required input reset, stuck-signal detection, recovery
+hysteresis and nonzero communication deadlines are checked.
+
+For an inactive service, preflight runs `--validate-only --check-engine`. For an
+active service it uses configuration-only validation to avoid loading a second
+service engine. `StatusText` distinguishes running input from paused input;
+paused input can be healthy and is not by itself a reason to restart.
+
+**Start detector** and **Restart detector** verify the loaded service mapping and
+manifest/config/runtime SHA256 revisions from the last readiness snapshot under
+the deployment lock. Changes require a fresh Check. Advanced **Repair service
+setup** links the checkout's existing unit, reloads systemd and verifies the link
+while idle. It does not enable/start the unit, provision accounts/groups/state,
+or install the namespaced journald policy. Those are host provisioning tasks.
+**Reload service definition** runs daemon-reload without restarting the detector.
+
+Temporary test runs use the stable installed slot with explicit output/capture
+CLI settings. Direct Start takes the deployment lock while verifying service
+inactivity and publishing its PID, then releases it for the session. Other
+cooperating starts/writers check that PID; cleanup takes the lock and removes
+only its own PID entry. Stop validates the tracked command line before SIGTERM.
+The PID state is in the remote SSH user's runtime directory. These guards do not
+serialize unrelated users or external tools that ignore the contract.
+
+## Live policy and confirmation
+
+Primary writes preserve source training JSON and all manifest fields except
+`manual_threshold`. Restore first writes the calibrated fallback and then clears
+that manual selection, preserving early-emission policy. Fallback/timing updates
+use the engine identity. Writes check deployment/config/policy revisions and the
+service invocation, use the deployment lock, replace files atomically and sync
+them. A local `threshold-actions.json` audit under Qt's application-local-data
+location records requests/results. Audit or partial-write failures are reported;
+file replacement alone is never active confirmation.
+
+Recovery requests use the native API version plus model/engine identity,
+expected revision and systemd invocation ID. The runtime uses a separate file
+at `threshold_override_path + ".recovery"` (normally
+`/var/lib/dkfz-live/threshold_override.conf.recovery`). Disabling retains the
+selected numeric threshold; an effective null threshold means off. A service
+restart restores the manifest startup policy, while a retained numeric selection
+can be used by a future explicit request. Stale files may produce
+`recovery_rejected`; the rejected update does not replace the current policy.
+
+Both controllers distinguish saved/requested from confirmed active state. Check,
+Enter and explicit Refresh actions read confirmation; there is no periodic
+status polling. A paused runtime can defer a request until another completed
+frame. Readbacks require matching engine/service identity and fresh diagnostics.
+The recovery API supports the installed service, not arbitrary direct processes.
+Absent API/readback support leaves live controls unavailable; startup policy can
+still be chosen for installation. The GUI never installs an API to enable them.
+
+Source calibration readback uses the deployed `source_model_dir` and variant.
+It is a saved snapshot, not proof of runtime application. Existing manifests do
+not pin original source-config byte identity. Missing, mismatched, changed-during-read
+or newer source files leave restoration unavailable/unconfirmed.
+
+## Output transport
+
+The output pane has a draggable divider and **Expand output** / **Restore
+controls** actions. GUI command banners, connection summaries and completion
+messages are omitted from that pane; status labels retain feedback. Backend
+programs can print their own command lines.
+
+Preparation subprocesses write into retained backend `.log` files. A foreground
+supervisor, using the selected Jetson Python interpreter, forwards newly written
+log bytes and performs a final drain after the child exits. Child stdout/stderr
+remain attached and Python output is unbuffered. The supervisor preserves exit
+codes and forwards received cancellation signals to the operation's process
+group. No helper file is installed. Terminating local SSH still cannot guarantee
+that every remote child has stopped; cancellation leaves results unconfirmed.
+
+Install/reuse exposes runtime validation output during its final readiness check.
+Ordinary discovery keeps its machine-readable response private. Installation
+captures private `__JCG_*` records separately from displayed logs, including
+fragmented records larger than a display chunk. Protocol framing keeps a final
+non-newline log fragment separate from the following stage record.
+
+The console is limited to 20,000 blocks. Live/custom-command stdout/stderr capture
+retains a 64 KiB tail per channel, and long partial display lines are chunked.
+Installation retains protocol data without duplicating all its logs in another
+buffer. Full build logs and configured direct-session logs remain on the Jetson.
+Service journals are transmitted unchanged; the desktop formats structured
+records into compact summaries while retaining operational fields and non-JSON
+lines. Original decision/emission coordinates are not changed.
 
 ## Models and coordinates
 
-Current-frame 50 Hz models and two-output recovery models remain supported.
-Separately trained delayed models are discovered under
-`finished_models/<family>/delayed_100hz/`; their declared model identity is used,
-not a name inferred from the folder. Four samples at 400 Hz produce 100 frames/s.
-The latest recurrent state predicts the previous frame with 10 ms context.
-Window seconds and holdoff milliseconds use the selected/deployed frame rate.
-An explicit `holdoff_frames` takes precedence; catalog metadata otherwise uses
-the backend's ceiling of `holdoff_ms` (default 200 ms) to whole frames. Missing
-deployed holdoff/window fields remain unavailable rather than displaying zero.
-Native validation remains authoritative for preprocessing/model compatibility.
+The GUI supports current-frame 50 Hz models and two-output recovery models.
+Separately trained `delayed_100hz` variants are discovered under
+`finished_models/<family>/delayed_100hz/`. Four samples at 400 Hz produce 100
+frames/s; the primary output targets the previous frame using 10 ms of subsequent
+context. Existing 50 Hz weights cannot acquire this target through a GUI switch.
+Single-output delayed models disable recovery controls.
 
-The runtime retains historical JSON keys ending in `_50hz` for frame indices
-even at 100 Hz. They are indices, not a conversion instruction. Trigger summaries
-separate candidate peak coordinates from actual emission coordinates. Original
-records, decision timestamps and GPIO-assertion timestamps remain intact. The
-GUI never subtracts prediction delay from emission time or infers head origin
-from a trigger's probability alone. A null timestamp stays unavailable.
+Frame rate determines displayed window seconds and holdoff milliseconds.
+`holdoff_frames` takes precedence; catalog metadata otherwise uses the backend's
+ceiling of `holdoff_ms` (default 200 ms) to whole frames. Missing deployed fields
+remain unavailable. Native validation is authoritative for model compatibility.
 
-## Deployment contract
+Historical JSON keys ending in `_50hz` remain frame indices at 100 Hz. Trigger
+summaries separate candidate coordinates from actual emission coordinates.
+Delayed probability telemetry identifies the previous-frame primary. For
+current/recovery models, `probability` is the current-head score and
+`recovery_prob` is the previous-frame score; `recovery_emitted_now` describes that
+probability record. A trigger score alone does not establish head origin.
+The GUI never subtracts prediction delay from emission times or invents a missing
+timestamp.
 
-The normal action is **Install selected model**: prepare, activate and verify
-service readiness as one command sequence under the GUI deployment lock. The
-service must already be idle and remains stopped. Success needs no additional
-Check before Start (the existing hardware confirmation still applies). A failed
-stage prevents subsequent stages; readiness failure after activation is reported
-as unconfirmed rather than claiming the service is ready.
+Recovery models share an LSTM. Joint/frozen/LOPO provenance is read from saved
+metadata, not a name suffix. Missing provenance is unknown. Frozen/unchanged
+primary-weight declarations, base checkpoint SHA256 and deployed engine identity
+are distinct evidence. Recovery-head nested LOPO is conditional on the frozen
+base: outer patients may have been seen by the base/preprocessing. The entire
+detector is not thereby established as patient-unseen. Fixed selected epochs
+are shown only when supplied; training length is not substituted.
 
-The GUI names a fresh working directory under `build_native/prepared_models/`
-using model identity, UTC time and a UUID. Preparation uses
-`--jetson-only --prepare-only`, repeated `--validation-input`, full recordings via
-`--max-stream-samples 0`, and confirmed `--ecg3-source ecg2_minus_ecg1`.
-Both rates retain the confirmation and recording checks. Empty advanced recording
-settings automatically use existing standard raw fixtures at
-`data/live/p12/p12_out.parquet` and `data/live/p13/p13_out.parquet`. At least one
-must exist; there is no silent omission of stream validation. If the host uses a
-different layout, configure explicit paths in the collapsed advanced section.
-Overrides apply in the current session. Paths are relative to the remote checkout;
-shell quoting preserves spaces and apostrophes. The backend validates file
-contents and refuses an existing/deploy output tree. No fallback to the old
-implicit prepare/activate command occurs.
+Saved calibration audits, FP allowances and early-emission metrics are not live
+performance guarantees. Primary/timing/holdoff/recovery edits can invalidate their
+applicability. Live disabling cannot undo prior emissions or shared holdoff.
+The GUI does not run training, recalibration or annotation editing. Backend
+training and target measurement procedures remain in its `docs/recovery-head.md`
+and `docs/100hz-delayed-target.md`.
 
-Preparation checks numerical and causal-stream equivalence and inference-only
-timing. It does not establish accuracy, sustained performance, physical UART
-transport or GPIO timing. The GUI does not interpret a pass as those results.
-Inspect event counts: probability coverage without emitted beats does not prove
-positive-event coverage. Accuracy review must use matching annotations and the
-appropriate metric schema; no training, tuning or annotation editing occurs here.
+## Scheduling and target qualification
 
-Activation runs automatically after successful preparation during installation.
-It passes the exact config, checkpoint, engine and `--validated-report` to the
-backend, with the selected variant and recovery policy. Fingerprint verification
-belongs to the backend and is repeated before replacement. Manual Prepare and
-Activate controls remain in the advanced section for diagnostics; editing inputs
-clears manual activation eligibility. Neither flow claims accuracy certification,
-runs paced qualification or measures hardware.
-The GUI keeps successful and failed working directories for evidence/source
-readback; cleanup is manual. It never rewrites source weights or annotations.
+Preflight accepts the original unit profile and the exact bounded worker RR/20
+profile. The latter requires matching loaded hard/soft `LimitRTPRIO=20`,
+`LimitRTTIME=200000` microseconds, normal main-thread scheduling, `CPUWeight=1000`,
+`TimerSlackNSec=1000`, and runtime CLI support for the requested realtime flags.
+Unknown profiles/incompatible limits are rejected. These are configuration checks;
+they do not promote SSH workers or change host power, clocks or global scheduling.
 
-**Reuse saved engine** discovers prior bundles under
-`build_native/prepared_models/`, independent of desktop session state. Discovery
-uses shell/coreutils and local Qt JSON parsing, requires the report/config/weights/
-engine to remain within the bundle, and excludes failed, incomplete or unsupported
-reports. Report eligibility includes successful stream parity, source unchanged,
-the ECG2-minus-ECG1 confirmation and config/checkpoint/engine SHA256 fingerprints.
-Entries are filtered locally by selected model identity, best/tuned variant and
-startup recovery policy. Check, Refresh models and Refresh saved engines load
-the catalog; editing selections sends no SSH commands.
+`worker_scheduling` records report observed policy/priority, requested priority,
+applied/degraded state and errors. View live logs includes history, so the GUI
+labels observations as current-invocation unconfirmed. Runtime health exposes
+`missed_frame_deadlines` and maximum host-UART-decode-to-completion delay, including
+when probability output is disabled. That anchor is not physical acquisition.
+RR scheduling and a 200 ms realtime CPU-use limit do not bound worst-case frame delay.
 
-Reuse takes the shared deployment lock, checks idle service/direct state, verifies
-the exact report revision read during discovery and compares the published config
-and weights to the bundle's normalized copies. It invokes the existing backend
-`check_prepared_model.py` and `deploy_model.sh --engine --validated-report` path,
-then performs the normal readiness probe. It does not export ONNX or build an
-engine; backend fingerprint, parity and native engine validation still run.
-Fresh validation recordings and a new ECG-source checkbox are unnecessary because
-the pinned report records that evidence. A changed source, changed report,
-invalid engine, recovery-policy mismatch or incompatible target fails explicitly;
-there is no automatic rebuild or service start. Install selected model remains
-the explicit full conversion path. No backend files or helper packages are added.
+Conversion validation checks numerical/causal-stream equivalence and inference-only
+timing. It does not establish accuracy, sustained 50/100 Hz operation under load
+and thermal conditions, or physical UART/GPIO timing. Positive event coverage,
+model-specific accuracy, current worker scheduling and physical timing require
+separate target qualification. Linux offscreen layout checks do not validate
+Windows packaging or actual Jetson hardware operation.
 
-Preparation and activation recheck idle service/direct-process state at execution
-time and share the GUI deployment lock with policy writes. They never stop or
-start the service. The backend additionally checks for concurrent GPU work.
-External tools must honor the runtime's guards/locks; the GUI cannot serialize
-uncooperative external writers. A cancelled SSH command can leave remote work or
-partial evidence; check the host before retrying. Each installation chooses a new directory.
-Service Start and Restart pin manifest/config/runtime revisions and verify the
-current service mapping under the same deployment lock. Direct Start takes that
-lock while checking service inactivity and publishing its PID, then releases it
-for the runtime session. A second GUI launch checks the published live PID.
+## Local verification
 
-Every Check button and Enter runs the complete readiness/model probe. The former
-quick/full split is removed. After reopening the GUI, the probe can match a
-deployed bundle to its published source by comparing the exact configuration and
-checkpoint bytes. It requires both files to remain within the checkout, handles
-best/tuned source layouts, and rejects changed artifacts. Model names alone do
-not establish this relationship.
-
-Live and custom-command stdout/stderr capture retains a 64 KiB tail per channel;
-partial lines are displayed in bounded chunks. The console retains its existing
-block limit and remote direct-session logs remain complete. Finite model/probe
-responses remain intact for parsing.
-
-Prepared tuned weights retain `model_variant=tuned`, but the bundle normalizes
-source copies to `model/train_config.json` and `model/best.pth`. The current
-backend recovery metadata helper expects `tuning/tuned_config.json` for a tuned
-source. After successful tuned preparation, the GUI adds a relative link at that
-path to `../train_config.json` inside the new bundle. This preserves source
-readback without changing the canonical config, report fingerprints or weights.
-Failure to create this link leaves preparation unconfirmed. Existing deployments
-keep their original source layout. Live restoration still needs matching native
-API readback and its normal source eligibility checks.
-
-## Scheduling and timing
-
-Preflight supports the original unit and the exact bounded RR/20 worker profile.
-For the bounded profile it reads systemd's loaded hard/soft RT limits, normal
-main-process policy, CPU weight and timer slack. Unknown flags, unlimited RT CPU
-time, process-wide RT profiles and runtimes without the required CLI flags are
-rejected. CLI capability comes from read-only `--help`. This checks the configured
-profile, not actual workers. It neither raises SSH limits nor installs a unit.
-
-Actual `worker_scheduling` records show thread, policy, priority, applied/degraded
-status and errors. Missing records never imply success. Follow log includes
-journal history and does not bind records to a current invocation, so the GUI
-labels them as last observed and current-invocation unconfirmed. It does not
-declare that all current workers are real-time. Runtime timing shows missed
-deadlines and maximum host-decode-to-completion delay, including with probability
-records disabled. This anchor is not a physical acquisition edge. RR scheduling
-and a 200 ms RT CPU-use limit do not bound worst-case frame delay.
-
-Required qualification remains: target TensorRT build and parity with real
-recordings; model-specific accuracy review; sustained 50/100 Hz processing under
-the requested scheduling profile, load and thermal conditions; current service
-worker readback; physical input/output timing. Windows packaging and interactive
-desktop layout have not been verified in this development environment.
-
-## Offline checks
+From the GUI checkout:
 
 ```bash
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
-cmake --build build -j 4
-ctest --test-dir build --output-on-failure -j 4
+./build.sh --test --jobs 2
 ```
 
-Qt tests use temporary fake SSH/systemd/runtime endpoints. They cover model
-discovery and identity, 50/100 Hz physical timing, preparation arguments,
-automatic directories and standard/override recordings, ECG confirmation,
-combined install with separate service start, fingerprinted activation paths,
-best/tuned/recovery policies, rejected preparation/reports, failed readiness,
-stale activity and reinstallation,
-saved-engine discovery, best/tuned/recovery-policy filtering, reuse at both frame
-rates, source/report changes, rejected engines, idle guards and readiness failures,
-worker scheduling/degradation, health delays and unchanged emission coordinates.
-They do not execute target preparation/activation, use real weights, or start or
-stop a real service. Existing policy/SSH/configuration tests remain part of CTest.
+The ten CTest suites use temporary fake SSH/systemd/runtime endpoints. Coverage
+includes model metadata, 50/100 Hz timing, quoting, policy validation/readback,
+revision/idle/locking guards, combined build/reuse, rejected reports/engines,
+changed source files, stale service/direct state, console capture, streamed logs
+on success/failure and partial final lines. They do not run real weights or
+TensorRT, operate UART/GPIO, or start/stop a real service. The Linux preparation
+stream fixtures require Python 3.
 
-An additional optional check exercises the actual runtime report-validation CLI
-against synthetic temporary bytes (not valid weights or TensorRT engines):
+An optional read-only check exercises the actual backend report-validation CLI
+with synthetic artifact bytes. Set the path to your local backend checkout:
 
 ```bash
-/home/fedora/work/live_stack/.venv/bin/python tests/check_runtime_validation_report.py /home/fedora/work/live_stack
+runtime=/absolute/path/to/live_stack
+"$runtime/.venv/bin/python" tests/check_runtime_validation_report.py "$runtime"
 ```
 
-This passed 20 cases for current/delayed reports: matching evidence and rejection
-of altered config/engine/checkpoint fingerprints, model identity, variant,
-recovery policy, failed validation, changed source, incorrect delayed ECG source
-and absent delayed stream evidence. It runs only `check_prepared_model.py`, never
-the deployment or preparation scripts. All 10 CTest targets passed locally.
+It checks 20 current/delayed report cases: matching evidence and rejection of
+changed fingerprints, identity, variant, recovery policy, failed validation,
+changed source, incorrect delayed ECG source and missing delayed stream evidence.
+It invokes `check_prepared_model.py` only, without preparing/activating a model.
+The local CTest suites and this report check have passed; target qualification
+remains separate. The release workflow performs its Windows installer smoke
+check separately from these local Linux checks.

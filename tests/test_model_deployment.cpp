@@ -113,9 +113,9 @@ printf 'model_name=%s\nsource_model_dir=%s\nmodel_variant=%s\n' "$1" "$3" "$5" >
     auto *name = window.findChild<QLineEdit *>("modelName");
     auto *directory = window.findChild<QLineEdit *>("modelDirectory");
     auto *variant = window.findChild<QComboBox *>("modelVariant");
-    auto *start = button(window, "Start direct inference");
-    auto *prepare = button(window, "Prepare isolated bundle");
-    auto *check = button(window, "Check availability");
+    auto *start = button(window, "Start test run");
+    auto *prepare = button(window, "Build files only");
+    auto *check = button(window, "Check Jetson");
     QVERIFY(models && refresh && reexport && name && directory && variant && start && prepare && check);
     auto *recoveryPolicy=window.findChild<QComboBox *>("recoveryDeploymentPolicy");
     QVERIFY(recoveryPolicy);

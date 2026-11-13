@@ -20,7 +20,7 @@ RecoveryPanel::RecoveryPanel(RecoveryController *controller, QWidget *parent)
     : QWidget(parent), controller_(controller)
 {
     auto *layout = new QVBoxLayout(this);
-    auto *deploymentGroup = new QGroupBox("Startup recovery", this);
+    auto *deploymentGroup = new QGroupBox("Recovery after restart", this);
     deploymentGroup_ = deploymentGroup;
     auto *deploymentLayout = new QVBoxLayout(deploymentGroup);
     deployment_ = new QComboBox(deploymentGroup);
@@ -30,18 +30,24 @@ RecoveryPanel::RecoveryPanel(RecoveryController *controller, QWidget *parent)
     deployment_->setToolTip(
         "Saved settings enable recovery only when the model enables it and has a calibrated threshold. "
         "Recovery off uses --no-recovery during preparation and activation and keeps both model outputs.");
-    deploymentLayout->addWidget(deployment_);
-    auto *restoreDeployment = new QPushButton("Reset startup selection", deploymentGroup);
+    auto *restoreDeployment = new QPushButton("Reset selection", deploymentGroup);
     restoreDeployment->setObjectName("restoreRecoveryDeployment");
-    deploymentLayout->addWidget(restoreDeployment);
+    restoreDeployment->setToolTip("Choose Use saved recovery settings again. Only changes this local selection; install or use an engine to change startup behavior.");
+    auto *deploymentRow = new QHBoxLayout;
+    deploymentRow->addWidget(deployment_, 1);
+    deploymentRow->addWidget(restoreDeployment);
+    deploymentLayout->addLayout(deploymentRow);
     auto *explanation = new QLabel(
-        "Choose the startup policy, then Install selected model. Starting the service is separate.",
+        "Choose the recovery policy for the engine you install or reuse. This selection takes effect after installation and the next detector start.",
         deploymentGroup);
     explanation->setWordWrap(true);
     deploymentLayout->addWidget(explanation);
     layout->addWidget(deploymentGroup);
-    auto *live = new QGroupBox("Live recovery override (this service invocation)", this);
+    auto *live = new QGroupBox("Recovery during this run", this);
     auto *form = new QFormLayout(live);
+    auto *intro = new QLabel("Edit the controls, then Apply recovery for this run. Refresh afterward to confirm. These changes expire when the detector restarts.", live);
+    intro->setWordWrap(true);
+    form->addRow(intro);
     summary_ = new QLabel(live);
     summary_->setWordWrap(true);
     summary_->setObjectName("recoverySummary");
@@ -68,10 +74,10 @@ RecoveryPanel::RecoveryPanel(RecoveryController *controller, QWidget *parent)
     calibrated_->setObjectName("calibratedRecovery");
     form->addRow("Calibrated recovery", calibrated_);
     detailForm->addRow("Deployed model", model_);
-    form->addRow("Startup / selected / requested", saved_);
-    form->addRow("Native active readback", active_);
+    form->addRow("Saved and requested settings", saved_);
+    form->addRow("Confirmed active settings", active_);
     detailForm->addRow("Status", status_);
-    enabled_ = new QCheckBox("Recovery enabled (edited; press Apply)", live);
+    enabled_ = new QCheckBox("Enable recovery (press Apply to send)", live);
     enabled_->setObjectName("recoveryEnabled");
     form->addRow(enabled_);
     thresholdMode_ = new QComboBox(live);
@@ -79,15 +85,16 @@ RecoveryPanel::RecoveryPanel(RecoveryController *controller, QWidget *parent)
     thresholdMode_->addItem("Use calibrated threshold");
     thresholdMode_->addItem("Advanced: custom threshold");
     thresholdMode_->addItem("Keep selected threshold");
+    thresholdMode_->setToolTip("Keep selected uses the last numeric recovery threshold. Calibrated uses the trained model's saved value. Custom lets you enter a value. Press Apply to send your selection.");
     custom_ = new QLineEdit(live);
     custom_->setObjectName("customRecoveryThreshold");
     custom_->setPlaceholderText("Explicit finite threshold in (0, 1]");
     form->addRow("Edited threshold selection", thresholdMode_);
     form->addRow("Custom recovery threshold", custom_);
     auto *buttons = new QHBoxLayout;
-    apply_ = new QPushButton("Apply recovery", live);
+    apply_ = new QPushButton("Apply recovery for this run", live);
     apply_->setObjectName("applyRecovery");
-    restore_ = new QPushButton("Restore calibrated recovery", live);
+    restore_ = new QPushButton("Restore saved recovery policy", live);
     restore_->setObjectName("restoreRecovery");
     refresh_ = new QPushButton("Refresh recovery state", live);
     refresh_->setObjectName("refreshRecovery");
@@ -173,7 +180,7 @@ void RecoveryPanel::update()
         summary = s.manifest.values.value("recovery_threshold").isEmpty()
                       ? "Saved startup: recovery off (current output only)."
                       : "Saved startup: recovery on.";
-        summary += " Live switching is unavailable on this stack; choose Startup recovery and Install selected model. "
+        summary += " Live switching is unavailable on this stack; choose Recovery after restart in Run, then use a saved engine or build and install a new one. "
                    "Active recovery state is unconfirmed.";
     }
     else if (s.api.value("confirmation") != "confirmed" || !active.value("enabled").isBool())
@@ -203,7 +210,7 @@ void RecoveryPanel::update()
     if (s.manifest.fingerprinted())
         model_->setText(model_->text() + "; engine CRC32 " + s.manifest.values.value("engine_crc32") +
                         "; bytes " + s.manifest.values.value("engine_size_bytes"));
-    saved_->setText(s.requested());
+    saved_->setText(s.manifest.contents.isEmpty() ? "Not read — click Refresh recovery state." : s.requested());
     calibrated_->setText(
         !s.manifest.contents.isEmpty() && !s.supportsRecovery() ? "Not applicable: single-output model"
         : !s.sourceAvailable ? "Unavailable / unconfirmed"
@@ -239,6 +246,14 @@ void RecoveryPanel::update()
     enabled_->setEnabled(supported);
     thresholdMode_->setEnabled(supported);
     custom_->setEnabled(supported && thresholdMode_->currentIndex() == 1);
+    const QString unavailable = controller_->ready() ? QString()
+        : "\nRequires a running two-output model with live recovery support. Start it from Run and Refresh recovery state. Current status: " + controller_->status();
+    enabled_->setToolTip("Edit the requested recovery enabled state. Click Apply recovery for this run to send it; changing this checkbox alone sends nothing." + unavailable);
+    custom_->setToolTip("Recovery threshold must be greater than 0 and at most 1. Select Advanced: custom threshold, enter a value, then Apply recovery for this run." + unavailable);
+    apply_->setToolTip("Send the edited recovery state and threshold to the current service run. Does not change restart defaults. Refresh recovery state to confirm application; paused input can delay it." + unavailable);
+    restore_->setToolTip("Request the source model's saved recovery enabled state and calibrated threshold for this run. Can restore disabled recovery too. Refresh to confirm." + unavailable +
+        (!s.sourceAvailable || !s.sourceUnchanged ? "\nSaved source calibration is unavailable or changed since installation." : ""));
+    refresh_->setToolTip("Read the installed model's recovery capability, saved calibration, pending request and active settings. Does not send a recovery change.");
     apply_->setEnabled(controller_->ready());
     restore_->setEnabled(controller_->ready() && s.sourceAvailable && s.sourceUnchanged);
     refresh_->setEnabled(controller_->refreshAvailable());

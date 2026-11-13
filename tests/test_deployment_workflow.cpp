@@ -18,6 +18,7 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QCryptographicHash>
+#include <QStandardPaths>
 #ifndef Q_OS_WIN
 #include <unistd.h>
 #endif
@@ -39,6 +40,30 @@ QPushButton *button(MainWindow &window, const QString &text) {
 class DeploymentWorkflowTest final : public QObject {
   Q_OBJECT
 private slots:
+  void consoleContainsOnlyRemoteOutput() {
+#ifdef Q_OS_WIN
+    QSKIP("Linux fake SSH host");
+#else
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const auto oldPath = qgetenv("PATH");
+    struct Restore { QByteArray path; ~Restore() { qputenv("PATH", path); } } restore{oldPath};
+    qputenv("PATH", dir.path().toUtf8() + "/bin:" + oldPath);
+    write(dir.filePath("bin/ssh"), "#!/bin/bash\necho 'remote stdout'\necho 'remote stderr' >&2\n", true);
+    MainWindow window({.host="fake", .remoteDirectory=dir.path()});
+    window.runCommand("GUI status must stay outside output", "NEVER_PRINT_THIS_COMMAND", MainWindow::TaskKind::serviceMutation);
+    QTRY_VERIFY_WITH_TIMEOUT(!window.runner_.isRunning(), 5000);
+    auto lines = window.console_->toPlainText().split('\n', Qt::SkipEmptyParts);
+    lines.sort();
+    QCOMPARE(lines, QStringList({"remote stderr", "remote stdout"}));
+    QVERIFY(window.statusLabel_->text().contains("exit code 0"));
+    window.console_->clear();
+    window.controlRunner_.start({.host="fake"}, "NEVER_PRINT_THIS_STOP_COMMAND");
+    QTRY_VERIFY_WITH_TIMEOUT(!window.controlRunner_.isRunning(), 5000);
+    lines = window.console_->toPlainText().split('\n', Qt::SkipEmptyParts);
+    lines.sort();
+    QCOMPARE(lines, QStringList({"remote stderr", "remote stdout"}));
+#endif
+  }
   void reusesSavedEngine_data() {
     QTest::addColumn<QString>("scenario");
     for (const auto *scenario : {"50hz", "100hz", "tuned", "recovery-off", "changed-config", "changed-weights",
@@ -276,6 +301,19 @@ printf 'model_name=%s\nmodel_variant=%s\nsource_model_dir=%s\nthreshold=0.3\n' "
     window.activeStandardOutput_.clear();
     window.runner_.standardOutputReceived(lines);
     QCOMPARE(window.activeStandardOutput_, lines);
+    // Large private protocol records must not leak into installation output.
+    window.console_->clear();
+    window.activeTask_ = MainWindow::TaskKind::installModel;
+    window.activeStandardOutput_.clear();
+    const QByteArray metadata = "__JCG_FINISHED_MODEL__=" + QByteArray(100000, 'a') + '\n';
+    window.runner_.standardOutputReceived(metadata.left(3));
+    window.runner_.standardOutputReceived(metadata.mid(3, 70000));
+    window.runner_.standardOutputReceived(metadata.mid(70003) + "installer stdout\n");
+    window.runner_.standardErrorReceived("installer stderr\n");
+    QCOMPARE(window.activeStandardOutput_, metadata);
+    QVERIFY(!window.console_->toPlainText().contains("__JCG_"));
+    QVERIFY(window.console_->toPlainText().contains("installer stdout"));
+    QVERIFY(window.console_->toPlainText().contains("installer stderr"));
   }
   void observesWorkerSchedulingWithoutInferringRealtime() {
 #ifdef Q_OS_WIN
@@ -299,8 +337,8 @@ elif [[ $last == *journalctl* ]]; then
 fi
 )SH", true);
     MainWindow window({.host="fake", .remoteDirectory=dir.path()});
-    auto *check = button(window, "Check availability");
-    auto *logs = button(window, "Follow log");
+    auto *check = button(window, "Check Jetson");
+    auto *logs = button(window, "View live logs");
     check->click();
     QTRY_VERIFY_WITH_TIMEOUT(logs->isEnabled(), 5000);
     logs->click();
@@ -318,7 +356,7 @@ fi
   }
   void installsSelectedModel_data() {
     QTest::addColumn<QString>("scenario");
-    for (const auto &s : {"50hz", "100hz", "tuned", "recovery-off", "custom-recordings", "missing-recordings", "prepare-fails", "report-rejected", "readiness-fails", "wrong-selection", "stale-service", "stale-direct", "reinstall"})
+    for (const auto &s : {"50hz", "100hz", "tuned", "recovery-off", "custom-recordings", "missing-recordings", "prepare-fails", "report-rejected", "readiness-fails", "wrong-selection", "stale-service", "stale-direct", "reinstall", "partial-log"})
       QTest::newRow(s) << QString(s);
   }
   void installsSelectedModel() {
@@ -326,6 +364,8 @@ fi
     QSKIP("Linux fake SSH host");
 #else
     QFETCH(QString, scenario);
+    const auto python = QStandardPaths::findExecutable("python3");
+    if (python.isEmpty()) QSKIP("Python 3 is required for the preparation log streamer");
     QTemporaryDir dir; QVERIFY(dir.isValid());
     const auto root = dir.path();
     const auto oldPath = qgetenv("PATH"), oldRuntime = qgetenv("XDG_RUNTIME_DIR");
@@ -379,7 +419,7 @@ esac
       write(root + "/data/live/p12/p12_out.parquet", "raw ECG fixture");
     write(root + "/config/native_uart_live.conf", "manifest_path=deploy/model/model.conf\ninput_reset_enabled=true\necg_baseline_reset_ms=100\nstuck_signal_reset_ms=100\ninput_recovery_ms=100\nwatchdog_enabled=true\nuart_timeout_ms=100\nsample_timeout_ms=100\n");
     write(root + "/deploy/dkfz-native-uart-live.service", "WorkingDirectory=/opt/dkfz-live\nBindReadOnlyPaths=" + root.toUtf8() + ":/opt/dkfz-live\nReadWritePaths=/var/lib/dkfz-live\nExecStart=/opt/dkfz-live/build_native/inference/native_uart_live_runtime --config /opt/dkfz-live/config/native_uart_live.conf\n");
-    write(root + "/build_native/inference/native_uart_live_runtime", "#!/bin/bash\nif [[ $(cat scenario) == readiness-fails ]] && test -e activated; then exit 1; fi\nexit 0\n", true);
+    write(root + "/build_native/inference/native_uart_live_runtime", "#!/bin/bash\necho 'engine check stdout'\necho 'engine check stderr' >&2\nif [[ $(cat scenario) == readiness-fails ]] && test -e activated; then exit 1; fi\nexit 0\n", true);
     write(root + "/deploy/model/model.conf", "model_name=old\nmodel_variant=best\nsource_model_dir=finished_models/old\nthreshold=0.3\n");
     write(root + "/deploy/model/model.engine", "old engine");
     write(root + "/prepare_model.sh", R"SH(#!/bin/bash
@@ -387,11 +427,15 @@ set -eu
 if flock -n .jetson-control-deployment.lock true; then exit 90; fi
 echo prepare >> actions
 printf '%s\n' "$@" > prepare.args
-[[ $(cat scenario) != prepare-fails ]]
 bundle=
 while (( $# )); do if [[ $1 == --output-dir ]]; then bundle=$2; fi; shift; done
 test -n "$bundle"
-mkdir -p "$bundle/model"
+mkdir -p "$bundle/model" "$bundle/logs"
+printf 'stage log first\nstage log last' > "$bundle/logs/onnx-export.log"
+if [[ $(cat scenario) != partial-log ]]; then printf '\n' >> "$bundle/logs/onnx-export.log"; fi
+echo 'prepare stdout'
+echo 'prepare stderr' >&2
+[[ $(cat scenario) != prepare-fails ]]
 echo unchanged-config-copy > "$bundle/model/train_config.json"
 echo report > "$bundle/validation_report.json"
 )SH", true);
@@ -408,12 +452,15 @@ done
 test -r "$report"
 [[ $(cat scenario) != report-rejected ]]
 echo activate >> actions
+echo 'activation stdout'
+echo 'activation stderr' >&2
 if [[ $(cat scenario) == wrong-selection ]]; then name=other; fi
 printf 'model_name=%s\nmodel_variant=%s\nsource_model_dir=%s\nthreshold=0.3\n' "$name" "$variant" "$model" > deploy/model/model.conf
 echo new-engine > deploy/model/model.engine
 touch activated
 )SH", true);
     MainWindow window({.host="fake", .remoteDirectory=root});
+    window.pythonExecutableEdit_->setText(python);
     auto *models = window.findChild<QComboBox *>("finishedModelSelection");
     auto *refresh = window.findChild<QPushButton *>("refreshFinishedModels");
     auto *install = window.findChild<QPushButton *>("installSelectedModel");
@@ -447,9 +494,17 @@ touch activated
     const bool activated = prepared && scenario != "report-rejected";
     const bool ready = activated && scenario != "readiness-fails" && scenario != "wrong-selection";
     const auto actions = read(root + "/actions");
+    const auto output = window.console_->toPlainText();
+    QVERIFY(!output.contains("__JCG_"));
+    QVERIFY(!output.contains("[Finished with exit code"));
     if (scenario == "missing-recordings" || scenario == "stale-service" || scenario == "stale-direct") {
       QVERIFY(actions.isEmpty());
     } else {
+      QVERIFY(output.contains("prepare stdout"));
+      QVERIFY(output.contains("prepare stderr"));
+      QCOMPARE(output.count("stage log first"), 1);
+      QCOMPARE(output.count("stage log last"), 1);
+      QVERIFY(!window.activeStandardOutput_.contains("stage log first"));
       QCOMPARE(actions, activated ? QByteArray("prepare\nactivate\n") : QByteArray("prepare\n"));
       const auto args = read(root + "/prepare.args");
       QVERIFY(args.contains("--prepare-only\n--output-dir\nbuild_native/prepared_models/gui-"));
@@ -463,6 +518,12 @@ touch activated
       const auto argList = args.split('\n');
       const auto bundle = QString::fromUtf8(argList.at(argList.indexOf("--output-dir") + 1));
       if (prepared) {
+        if (activated) {
+          QVERIFY(output.contains("activation stdout"));
+          QVERIFY(output.contains("activation stderr"));
+          QVERIFY(output.contains("engine check stdout"));
+          QVERIFY(output.contains("engine check stderr"));
+        }
         const auto activation = read(root + "/activate.args");
         QVERIFY(activation.contains("--validated-report\n" + bundle.toUtf8() + "/validation_report.json\n"));
         QVERIFY(activation.contains("--config\n" + bundle.toUtf8() + "/model/train_config.json\n"));
@@ -476,7 +537,7 @@ touch activated
         QCOMPARE(read(alias), QByteArray("unchanged-config-copy\n"));
       }
     }
-    auto *start = button(window, "Start");
+    auto *start = button(window, "Start detector");
     QVERIFY(start);
     auto *hardware = window.findChild<QCheckBox *>("serviceHardwareReview");
     if (ready) {

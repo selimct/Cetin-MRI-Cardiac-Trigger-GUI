@@ -31,54 +31,72 @@ ThresholdPanel::ThresholdPanel(ThresholdController *controller, QWidget *parent)
     : QWidget(parent), controller_(controller)
 {
     auto *layout = new QVBoxLayout(this);
+    auto *heading = new QLabel("<b>Primary detection threshold</b>", this);
+    layout->addWidget(heading);
+    auto *intro = label(this);
+    intro->setText("Set the main event-detection threshold. Applied changes are saved for future starts. Refresh active settings afterward to confirm what the running detector accepted.");
+    layout->addWidget(intro);
     auto *form = new QFormLayout;
+    auto *details = new QWidget(this);
+    auto *detailsForm = new QFormLayout(details);
     model_ = label(this);
     values_ = label(this);
     saved_ = label(this);
     active_ = label(this);
     status_ = label(this);
     policy_ = label(this);
-    form->addRow("Deployed model", model_);
-    form->addRow("Calibrated primary thresholds", values_);
-    form->addRow("Persistent startup selection", saved_);
-    form->addRow("Persistent live fallback / timing", policy_);
-    form->addRow("Confirmed active primary policy", active_);
-    form->addRow("Request status", status_);
+    detailsForm->addRow("Installed model", model_);
+    detailsForm->addRow("Model calibration", values_);
+    form->addRow("Saved for next start", saved_);
+    detailsForm->addRow("Saved timing policy", policy_);
+    form->addRow("Confirmed active settings", active_);
+    form->addRow("Last request", status_);
     layout->addLayout(form);
     custom_ = new QLineEdit(this);
     custom_->setObjectName("customThreshold");
     custom_->setPlaceholderText("Finite probability, 0 through 1");
-    apply_ = new QPushButton("Apply custom", this);
+    apply_ = new QPushButton("Apply threshold", this);
     apply_->setObjectName("applyThreshold");
     auto *customRow = new QHBoxLayout;
     customRow->addWidget(custom_);
     customRow->addWidget(apply_);
     layout->addLayout(customRow);
     auto *buttons = new QHBoxLayout;
-    der_ = new QPushButton("Use Weighted DER", this);
-    fp_ = new QPushButton("Use Historical FP-first", this);
-    reset_ = new QPushButton("Restore calibrated primary", this);
+    der_ = new QPushButton("Use DER preset", this);
+    fp_ = new QPushButton("Use FP-first preset", this);
+    reset_ = new QPushButton("Restore model default", this);
     reset_->setObjectName("restorePrimaryThreshold");
-    refresh_ = new QPushButton("Refresh deployed thresholds", this);
+    refresh_ = new QPushButton("Refresh active settings", this);
     refresh_->setObjectName("refreshThresholds");
-    buttons->addWidget(der_);
-    buttons->addWidget(fp_);
+    auto *presetButtons = new QHBoxLayout;
+    presetButtons->addWidget(der_);
+    presetButtons->addWidget(fp_);
+    detailsForm->addRow("Other saved presets", presetButtons);
     buttons->addWidget(reset_);
     buttons->addWidget(refresh_);
     layout->addLayout(buttons);
-    early_ = new QCheckBox("Early emission", this);
+    early_ = new QCheckBox("Emit qualifying peaks earlier (applies immediately)", this);
     early_->setObjectName("earlyEmission");
     early_->setToolTip("Emit earlier on the falling edge when a peak reaches the FP reference level.\n"
                        "Smaller peaks still wait for the selected detection threshold.");
     layout->addWidget(early_);
     auto *help = label(this);
-    help->setText("Primary Apply saves manual_threshold in the deployed manifest for startup and requests live reload. "
-        "Restore clears that selection and restores the calibrated automatic threshold, preserving the selected early-emission policy. "
-        "The fallback/timing file persists across service restarts. Recovery has a separate live override. "
-        "Source calibrations and other detector settings are preserved. Early emission changes trigger timing; "
-        "calibration error counts do not measure live performance with it enabled. Changes clear an unfinished primary candidate. "
-        "After applying, click Refresh deployed thresholds to confirm native application; paused input can delay it. Status is never polled automatically.");
-    layout->addWidget(help);
+    help->setText("The saved presets are calibration values from the installed model. Applying one saves a manual primary selection; Restore model default returns to automatic selection. "
+        "Early-emission timing is saved separately and survives a restart. Changes clear any unfinished primary candidate. "
+        "Refresh active settings confirms application; paused input can delay it. Runtime changes do not recalibrate the model.");
+    // Keep the runtime/calibration bookkeeping available without crowding the
+    // normal edit/apply/confirm flow.
+    detailsForm->addRow(help);
+    auto *showDetails = new QPushButton("Show presets, calibration and timing", this);
+    showDetails->setCheckable(true);
+    showDetails->setToolTip("Expand saved calibration, model identity and fallback/timing information.");
+    layout->addWidget(showDetails);
+    layout->addWidget(details);
+    details->hide();
+    connect(showDetails, &QPushButton::toggled, details, &QWidget::setVisible);
+    connect(showDetails, &QPushButton::toggled, showDetails, [showDetails](bool open) {
+        showDetails->setText(open ? "Hide presets, calibration and timing" : "Show presets, calibration and timing");
+    });
     layout->addStretch();
     connect(refresh_, &QPushButton::clicked, controller_, &ThresholdController::refresh);
     connect(apply_, &QPushButton::clicked, this, [this]
@@ -130,9 +148,15 @@ void ThresholdPanel::update()
     der_->setEnabled(ready && m.der.has_value());
     fp_->setEnabled(ready && m.fp.has_value());
     reset_->setEnabled(ready && controller_->canReset());
-    reset_->setToolTip("Reset writes the automatic fallback before clearing the manual value. With policy polling disabled, same-invocation startup evidence is required to prove no fallback was accepted.");
+    const QString prerequisite = ready ? QString() : "\nStart the installed detector from Run, then Refresh active settings. Refresh also confirms a pending request. Current status: " + controller_->status();
+    apply_->setToolTip("Save the entered value (0 through 1) as the primary threshold and request live application. Also applies after restart. Refresh to confirm; paused input can delay application." + prerequisite);
+    der_->setToolTip("Use the installed model's saved Weighted DER calibration as a manual primary threshold. Saves for restart and requests live application. This does not recalibrate the model." + (m.der ? prerequisite : "\nThe installed model has no DER preset."));
+    fp_->setToolTip("Use the installed model's saved historical FP-first calibration as a manual primary threshold. Saves for restart and requests live application. This does not recalibrate the model." + (m.fp ? prerequisite : "\nThe installed model has no FP-first preset."));
+    reset_->setToolTip("Restore the model's calibrated automatic primary threshold and clear the saved manual selection. Keeps the chosen early-emission timing policy. Refresh afterward to confirm." + prerequisite);
+    refresh_->setToolTip("Read saved thresholds and recent status from the running installed detector. Confirms whether the last request has applied. Makes no setting changes.");
     refresh_->setEnabled(!controller_->blocking());
     early_->setEnabled(ready && controller_->policyAvailable());
+    early_->setToolTip("Clicking immediately saves and requests this timing policy. Qualifying peaks that reach the reference level can be emitted earlier on the falling edge. Smaller peaks wait for the detection threshold. Persists across restarts; Refresh active settings to confirm." + prerequisite);
     const QSignalBlocker blocker(early_);
     early_->setChecked(controller_->selectedEarly());
 }

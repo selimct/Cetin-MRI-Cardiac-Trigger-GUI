@@ -18,6 +18,7 @@ class QCheckBox;
 class QCloseEvent;
 class QColor;
 class QComboBox;
+class QEvent;
 class QLabel;
 class QLineEdit;
 class QPlainTextEdit;
@@ -35,6 +36,7 @@ public:
 
 protected:
   void closeEvent(QCloseEvent *event) override;
+  bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
   friend class DeploymentWorkflowTest;
@@ -148,6 +150,8 @@ private:
 
   QTabWidget *operationsTabs_{nullptr};
   QLabel *serviceAvailabilityLabel_{nullptr};
+  QLabel *nextStepLabel_{nullptr};
+  QLabel *installedModelLabel_{nullptr};
   QCheckBox *serviceSafetyCheck_{nullptr};
   QPushButton *serviceInstallButton_{nullptr};
   QPushButton *serviceStatusButton_{nullptr};
